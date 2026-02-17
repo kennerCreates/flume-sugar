@@ -394,10 +394,10 @@ impl State {
             transform.position += velocity.linear * dt;
         }
 
-        // Bounds system - bounce to random position when leaving area
-        let mut query = self.world.query::<&mut Transform>();
+        // Bounds system - redirect velocity toward random point when leaving area
+        let mut query = self.world.query::<(&mut Transform, &mut Velocity)>();
         let half_bounds = bounds / 2.0;
-        for mut transform in query.iter_mut(&mut self.world) {
+        for (transform, mut velocity) in query.iter_mut(&mut self.world) {
             let mut out_of_bounds = false;
 
             // Check if out of bounds on any axis
@@ -411,15 +411,24 @@ impl State {
                 out_of_bounds = true;
             }
 
-            // If out of bounds, relocate to random position within bounds
+            // If out of bounds, redirect velocity toward a random point within bounds
             if out_of_bounds {
                 use rand::Rng;
                 let mut rng = rand::thread_rng();
-                transform.position = Vec3::new(
-                    rng.gen_range(-half_bounds.x + 0.5..half_bounds.x - 0.5),
-                    rng.gen_range(0.5..bounds.y - 0.5),
-                    rng.gen_range(-half_bounds.z + 0.5..half_bounds.z - 0.5),
+
+                // Pick random target position within bounds (with margin)
+                let target = Vec3::new(
+                    rng.gen_range(-half_bounds.x + 1.0..half_bounds.x - 1.0),
+                    rng.gen_range(1.0..bounds.y - 1.0),
+                    rng.gen_range(-half_bounds.z + 1.0..half_bounds.z - 1.0),
                 );
+
+                // Calculate direction to target
+                let direction = (target - transform.position).normalize();
+
+                // Keep similar speed but change direction
+                let current_speed = velocity.linear.length();
+                velocity.linear = direction * current_speed;
             }
         }
     }
