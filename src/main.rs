@@ -394,26 +394,32 @@ impl State {
             transform.position += velocity.linear * dt;
         }
 
-        // Bounds system
+        // Bounds system - bounce to random position when leaving area
         let mut query = self.world.query::<&mut Transform>();
         let half_bounds = bounds / 2.0;
         for mut transform in query.iter_mut(&mut self.world) {
-            if transform.position.x > half_bounds.x {
-                transform.position.x = -half_bounds.x;
-            } else if transform.position.x < -half_bounds.x {
-                transform.position.x = half_bounds.x;
+            let mut out_of_bounds = false;
+
+            // Check if out of bounds on any axis
+            if transform.position.x > half_bounds.x || transform.position.x < -half_bounds.x {
+                out_of_bounds = true;
+            }
+            if transform.position.z > half_bounds.z || transform.position.z < -half_bounds.z {
+                out_of_bounds = true;
+            }
+            if transform.position.y < 0.0 || transform.position.y > bounds.y {
+                out_of_bounds = true;
             }
 
-            if transform.position.z > half_bounds.z {
-                transform.position.z = -half_bounds.z;
-            } else if transform.position.z < -half_bounds.z {
-                transform.position.z = half_bounds.z;
-            }
-
-            if transform.position.y < 0.0 {
-                transform.position.y = 0.0;
-            } else if transform.position.y > bounds.y {
-                transform.position.y = bounds.y;
+            // If out of bounds, relocate to random position within bounds
+            if out_of_bounds {
+                use rand::Rng;
+                let mut rng = rand::thread_rng();
+                transform.position = Vec3::new(
+                    rng.gen_range(-half_bounds.x + 0.5..half_bounds.x - 0.5),
+                    rng.gen_range(0.5..bounds.y - 0.5),
+                    rng.gen_range(-half_bounds.z + 0.5..half_bounds.z - 0.5),
+                );
             }
         }
     }
