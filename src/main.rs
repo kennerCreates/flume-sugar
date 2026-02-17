@@ -1,5 +1,5 @@
-// ECS-powered 3D rendering demo
-// Renders hundreds of colored cubes managed by bevy_ecs
+// ECS-powered 3D rendering with INSTANCED rendering
+// Draws 1000s of entities in a single draw call
 // See docs/research/ecs-choice.md for ECS architecture decisions
 
 mod engine;
@@ -22,7 +22,6 @@ use engine::{Transform, Velocity, Color as EntityColor};
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     position: [f32; 3],
-    color: [f32; 3],
 }
 
 impl Vertex {
@@ -36,26 +35,56 @@ impl Vertex {
                     shader_location: 0,
                     format: wgpu::VertexFormat::Float32x3,
                 },
+            ],
+        }
+    }
+}
+
+// ============================================================================
+// INSTANCE DATA (per-entity)
+// ============================================================================
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct InstanceData {
+    position: [f32; 3],
+    _padding: f32,  // Align to 16 bytes
+    color: [f32; 4],
+}
+
+impl InstanceData {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<InstanceData>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,  // One per instance, not per vertex
+            attributes: &[
+                // Position (location 1)
                 wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    offset: 0,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
+                },
+                // Color (location 2)
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x4,
                 },
             ],
         }
     }
 }
 
-// Cube vertices (unit cube centered at origin)
+// Cube vertices (unit cube)
 const CUBE_VERTICES: &[Vertex] = &[
-    Vertex { position: [-0.1, -0.1,  0.1], color: [1.0, 1.0, 1.0] },
-    Vertex { position: [ 0.1, -0.1,  0.1], color: [1.0, 1.0, 1.0] },
-    Vertex { position: [ 0.1,  0.1,  0.1], color: [1.0, 1.0, 1.0] },
-    Vertex { position: [-0.1,  0.1,  0.1], color: [1.0, 1.0, 1.0] },
-    Vertex { position: [-0.1, -0.1, -0.1], color: [1.0, 1.0, 1.0] },
-    Vertex { position: [ 0.1, -0.1, -0.1], color: [1.0, 1.0, 1.0] },
-    Vertex { position: [ 0.1,  0.1, -0.1], color: [1.0, 1.0, 1.0] },
-    Vertex { position: [-0.1,  0.1, -0.1], color: [1.0, 1.0, 1.0] },
+    Vertex { position: [-0.1, -0.1,  0.1] },
+    Vertex { position: [ 0.1, -0.1,  0.1] },
+    Vertex { position: [ 0.1,  0.1,  0.1] },
+    Vertex { position: [-0.1,  0.1,  0.1] },
+    Vertex { position: [-0.1, -0.1, -0.1] },
+    Vertex { position: [ 0.1, -0.1, -0.1] },
+    Vertex { position: [ 0.1,  0.1, -0.1] },
+    Vertex { position: [-0.1,  0.1, -0.1] },
 ];
 
 const CUBE_INDICES: &[u16] = &[
@@ -68,23 +97,19 @@ const CUBE_INDICES: &[u16] = &[
 ];
 
 // ============================================================================
-// UNIFORM DATA
+// UNIFORM DATA (camera only)
 // ============================================================================
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
-    view_proj: [[f32; 4]; 4],  // View-projection matrix
-    model: [[f32; 4]; 4],       // Model matrix (per-entity transform)
-    color: [f32; 4],            // Entity color
+    view_proj: [[f32; 4]; 4],
 }
 
 impl Uniforms {
     fn new() -> Self {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
-            model: Mat4::IDENTITY.to_cols_array_2d(),
-            color: [1.0, 1.0, 1.0, 1.0],
         }
     }
 }
@@ -102,7 +127,9 @@ struct State {
     render_pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
+    instance_buffer: wgpu::Buffer,
     num_indices: u32,
+    max_instances: usize,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
 
@@ -171,7 +198,7 @@ impl State {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader_instanced.wgsl").into()),
         });
 
         let uniforms = Uniforms::new();
@@ -186,7 +213,7 @@ impl State {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -219,7 +246,7 @@ impl State {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
+                buffers: &[Vertex::desc(), InstanceData::desc()],  // Vertex + Instance buffers
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -265,6 +292,15 @@ impl State {
             usage: wgpu::BufferUsages::INDEX,
         });
 
+        // Create instance buffer (large enough for many instances)
+        let max_instances = 10000;
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Instance Buffer"),
+            size: (max_instances * std::mem::size_of::<InstanceData>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let num_indices = CUBE_INDICES.len() as u32;
 
         // Create ECS world and spawn test entities
@@ -280,7 +316,9 @@ impl State {
             render_pipeline,
             vertex_buffer,
             index_buffer,
+            instance_buffer,
             num_indices,
+            max_instances,
             uniform_buffer,
             uniform_bind_group,
             world,
@@ -300,12 +338,10 @@ impl State {
     }
 
     fn update(&mut self) {
-        // Calculate delta time
         let now = std::time::Instant::now();
         let dt = (now - self.last_update).as_secs_f32();
         self.last_update = now;
 
-        // Rotate camera
         self.camera_angle += 0.2 * dt;
 
         // Update ECS systems
@@ -317,7 +353,7 @@ impl State {
             transform.position += velocity.linear * dt;
         }
 
-        // Bounds system (wrap around)
+        // Bounds system
         let mut query = self.world.query::<&mut Transform>();
         let half_bounds = bounds / 2.0;
         for mut transform in query.iter_mut(&mut self.world) {
@@ -347,6 +383,48 @@ impl State {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Collect instance data from ECS BEFORE creating render pass
+        let mut instance_data = Vec::new();
+        let mut query = self.world.query::<(&Transform, &EntityColor)>();
+        for (transform, color) in query.iter(&self.world) {
+            instance_data.push(InstanceData {
+                position: transform.position.to_array(),
+                _padding: 0.0,
+                color: [color.r, color.g, color.b, 1.0],
+            });
+        }
+
+        let instance_count = instance_data.len().min(self.max_instances);
+
+        // Write instance data to buffer BEFORE render pass
+        if !instance_data.is_empty() {
+            self.queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&instance_data[..instance_count]),
+            );
+        }
+
+        // Update camera uniforms
+        let aspect = self.size.width as f32 / self.size.height as f32;
+        let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
+
+        let camera_x = self.camera_angle.cos() * self.camera_distance;
+        let camera_z = self.camera_angle.sin() * self.camera_distance;
+        let view_matrix = Mat4::look_at_rh(
+            Vec3::new(camera_x, 8.0, camera_z),
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::Y,
+        );
+
+        let view_proj = projection * view_matrix;
+        let uniforms = Uniforms {
+            view_proj: view_proj.to_cols_array_2d(),
+        };
+
+        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+        // NOW create render pass (after all buffer writes)
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -375,39 +453,13 @@ impl State {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));  // Instance data
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
-            // Camera setup
-            let aspect = self.size.width as f32 / self.size.height as f32;
-            let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
-
-            let camera_x = self.camera_angle.cos() * self.camera_distance;
-            let camera_z = self.camera_angle.sin() * self.camera_distance;
-            let view = Mat4::look_at_rh(
-                Vec3::new(camera_x, 8.0, camera_z),
-                Vec3::new(0.0, 0.0, 0.0),
-                Vec3::Y,
-            );
-
-            let view_proj = projection * view;
-
-            // Render each entity
-            let mut query = self.world.query::<(&Transform, &EntityColor)>();
-            for (transform, color) in query.iter(&self.world) {
-                let model = Mat4::from_translation(transform.position);
-
-                let uniforms = Uniforms {
-                    view_proj: view_proj.to_cols_array_2d(),
-                    model: model.to_cols_array_2d(),
-                    color: [color.r, color.g, color.b, 1.0],
-                };
-
-                self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-
-                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
-            }
+            // ONE DRAW CALL for all instances!
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..instance_count as u32);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -458,7 +510,7 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
 
     let window_attributes = Window::default_attributes()
-        .with_title("Flume Sugar - ECS Demo (1000 entities)")
+        .with_title("Flume Sugar - Instanced Rendering Demo (1000 entities, 1 draw call!)")
         .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
     let window = std::sync::Arc::new(event_loop.create_window(window_attributes).unwrap());
@@ -495,12 +547,11 @@ fn main() {
                         Err(e) => eprintln!("{:?}", e),
                     }
 
-                    // FPS counter
                     frame_count += 1;
                     let now = std::time::Instant::now();
                     if (now - last_fps_update).as_secs_f32() >= 1.0 {
                         let entity_count = state.world.query::<&Transform>().iter(&state.world).count();
-                        println!("FPS: {} | Entities: {}", frame_count, entity_count);
+                        println!("FPS: {} | Entities: {} | Draw calls: 1", frame_count, entity_count);
                         frame_count = 0;
                         last_fps_update = now;
                     }
