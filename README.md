@@ -19,11 +19,12 @@ An RTS in the style of StarCraft 2's campaign, with:
 - ✅ ECS integration (bevy_ecs)
 - ✅ Entity spawning and management
 - ✅ Basic movement and bounds systems
+- ✅ Instanced rendering (1000 entities in 1 draw call @ 60 FPS)
+- ✅ Per-entity transforms and colors
 
 **Next up:**
-- ⬜ Fix per-entity transforms in rendering
-- ⬜ Instanced rendering for performance
-- ⬜ RTS-style camera system
+- ⬜ RTS-style camera system (WASD, edge scrolling, zoom)
+- ⬜ Depth buffer for proper 3D occlusion
 - ⬜ Procedural modeling system (skin + subdivision)
 
 ## Build & Run
@@ -61,7 +62,7 @@ flume_sugar/
 │   │   ├── systems.rs         # ECS systems (movement, etc.)
 │   │   └── mod.rs
 │   ├── main.rs                # Application entry point
-│   └── shader.wgsl            # GPU shaders (WGSL)
+│   └── shader_instanced.wgsl  # GPU shaders with instancing (WGSL)
 └── Cargo.toml
 ```
 
