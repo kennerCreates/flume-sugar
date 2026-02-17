@@ -132,6 +132,8 @@ struct State {
     max_instances: usize,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
+    depth_texture: wgpu::Texture,
+    depth_view: wgpu::TextureView,
 
     // ECS World
     world: World,
@@ -143,6 +145,29 @@ struct State {
 }
 
 impl State {
+    fn create_depth_texture(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> (wgpu::Texture, wgpu::TextureView) {
+        let size = wgpu::Extent3d {
+            width: config.width,
+            height: config.height,
+            depth_or_array_layers: 1,
+        };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Depth Texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        (texture, view)
+    }
+
     async fn new(window: std::sync::Arc<winit::window::Window>) -> Self {
         let size = window.inner_size();
 
@@ -268,7 +293,13 @@ impl State {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,
@@ -303,6 +334,9 @@ impl State {
 
         let num_indices = CUBE_INDICES.len() as u32;
 
+        // Create depth texture
+        let (depth_texture, depth_view) = Self::create_depth_texture(&device, &config);
+
         // Create ECS world and spawn test entities
         let mut world = World::new();
         spawn_test_entities(&mut world, 1000);
@@ -321,6 +355,8 @@ impl State {
             max_instances,
             uniform_buffer,
             uniform_bind_group,
+            depth_texture,
+            depth_view,
             world,
             last_update: std::time::Instant::now(),
             camera_distance: 15.0,
@@ -334,6 +370,11 @@ impl State {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
+
+            // Recreate depth texture with new size
+            let (depth_texture, depth_view) = Self::create_depth_texture(&self.device, &self.config);
+            self.depth_texture = depth_texture;
+            self.depth_view = depth_view;
         }
     }
 
@@ -447,7 +488,14 @@ impl State {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
