@@ -23,6 +23,7 @@ use engine::{Transform, Velocity, Color as EntityColor};
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     position: [f32; 3],
+    normal: [f32; 3],
 }
 
 impl Vertex {
@@ -31,9 +32,16 @@ impl Vertex {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
+                // Position
                 wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                // Normal
+                wgpu::VertexAttribute {
+                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
                 },
             ],
@@ -59,16 +67,16 @@ impl InstanceData {
             array_stride: std::mem::size_of::<InstanceData>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,  // One per instance, not per vertex
             attributes: &[
-                // Position (location 1)
+                // Position (location 2, after vertex position and normal)
                 wgpu::VertexAttribute {
                     offset: 0,
-                    shader_location: 1,
+                    shader_location: 2,
                     format: wgpu::VertexFormat::Float32x3,
                 },
-                // Color (location 2)
+                // Color (location 3)
                 wgpu::VertexAttribute {
                     offset: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                    shader_location: 2,
+                    shader_location: 3,
                     format: wgpu::VertexFormat::Float32x4,
                 },
             ],
@@ -76,41 +84,92 @@ impl InstanceData {
     }
 }
 
-// Cube vertices (unit cube)
+// Cube vertices with normals (24 vertices, 4 per face for proper flat shading)
 const CUBE_VERTICES: &[Vertex] = &[
-    Vertex { position: [-0.1, -0.1,  0.1] },
-    Vertex { position: [ 0.1, -0.1,  0.1] },
-    Vertex { position: [ 0.1,  0.1,  0.1] },
-    Vertex { position: [-0.1,  0.1,  0.1] },
-    Vertex { position: [-0.1, -0.1, -0.1] },
-    Vertex { position: [ 0.1, -0.1, -0.1] },
-    Vertex { position: [ 0.1,  0.1, -0.1] },
-    Vertex { position: [-0.1,  0.1, -0.1] },
+    // Front face (normal: [0, 0, 1])
+    Vertex { position: [-0.1, -0.1,  0.1], normal: [0.0, 0.0, 1.0] },
+    Vertex { position: [ 0.1, -0.1,  0.1], normal: [0.0, 0.0, 1.0] },
+    Vertex { position: [ 0.1,  0.1,  0.1], normal: [0.0, 0.0, 1.0] },
+    Vertex { position: [-0.1,  0.1,  0.1], normal: [0.0, 0.0, 1.0] },
+
+    // Back face (normal: [0, 0, -1])
+    Vertex { position: [ 0.1, -0.1, -0.1], normal: [0.0, 0.0, -1.0] },
+    Vertex { position: [-0.1, -0.1, -0.1], normal: [0.0, 0.0, -1.0] },
+    Vertex { position: [-0.1,  0.1, -0.1], normal: [0.0, 0.0, -1.0] },
+    Vertex { position: [ 0.1,  0.1, -0.1], normal: [0.0, 0.0, -1.0] },
+
+    // Left face (normal: [-1, 0, 0])
+    Vertex { position: [-0.1, -0.1, -0.1], normal: [-1.0, 0.0, 0.0] },
+    Vertex { position: [-0.1, -0.1,  0.1], normal: [-1.0, 0.0, 0.0] },
+    Vertex { position: [-0.1,  0.1,  0.1], normal: [-1.0, 0.0, 0.0] },
+    Vertex { position: [-0.1,  0.1, -0.1], normal: [-1.0, 0.0, 0.0] },
+
+    // Right face (normal: [1, 0, 0])
+    Vertex { position: [ 0.1, -0.1,  0.1], normal: [1.0, 0.0, 0.0] },
+    Vertex { position: [ 0.1, -0.1, -0.1], normal: [1.0, 0.0, 0.0] },
+    Vertex { position: [ 0.1,  0.1, -0.1], normal: [1.0, 0.0, 0.0] },
+    Vertex { position: [ 0.1,  0.1,  0.1], normal: [1.0, 0.0, 0.0] },
+
+    // Top face (normal: [0, 1, 0])
+    Vertex { position: [-0.1,  0.1,  0.1], normal: [0.0, 1.0, 0.0] },
+    Vertex { position: [ 0.1,  0.1,  0.1], normal: [0.0, 1.0, 0.0] },
+    Vertex { position: [ 0.1,  0.1, -0.1], normal: [0.0, 1.0, 0.0] },
+    Vertex { position: [-0.1,  0.1, -0.1], normal: [0.0, 1.0, 0.0] },
+
+    // Bottom face (normal: [0, -1, 0])
+    Vertex { position: [-0.1, -0.1, -0.1], normal: [0.0, -1.0, 0.0] },
+    Vertex { position: [ 0.1, -0.1, -0.1], normal: [0.0, -1.0, 0.0] },
+    Vertex { position: [ 0.1, -0.1,  0.1], normal: [0.0, -1.0, 0.0] },
+    Vertex { position: [-0.1, -0.1,  0.1], normal: [0.0, -1.0, 0.0] },
 ];
 
 const CUBE_INDICES: &[u16] = &[
-    0, 1, 2,  0, 2, 3,  // Front
-    5, 4, 7,  5, 7, 6,  // Back
-    4, 0, 3,  4, 3, 7,  // Left
-    1, 5, 6,  1, 6, 2,  // Right
-    3, 2, 6,  3, 6, 7,  // Top
-    4, 5, 1,  4, 1, 0,  // Bottom
+    0, 1, 2,  0, 2, 3,    // Front
+    4, 5, 6,  4, 6, 7,    // Back
+    8, 9, 10,  8, 10, 11,  // Left
+    12, 13, 14,  12, 14, 15, // Right
+    16, 17, 18,  16, 18, 19, // Top
+    20, 21, 22,  20, 22, 23, // Bottom
 ];
 
 // ============================================================================
-// UNIFORM DATA (camera only)
+// UNIFORM DATA (camera and lighting)
 // ============================================================================
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     view_proj: [[f32; 4]; 4],
+    camera_pos: [f32; 3],
+    _padding: u32,  // Align to 16 bytes (WGSL requirement)
 }
 
 impl Uniforms {
     fn new() -> Self {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            camera_pos: [0.0, 0.0, 0.0],
+            _padding: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct LightUniform {
+    direction: [f32; 3],
+    _padding: u32,  // Align to 16 bytes (WGSL requirement)
+    color: [f32; 3],
+    _padding2: u32,  // Align to 16 bytes (WGSL requirement)
+}
+
+impl LightUniform {
+    fn new() -> Self {
+        Self {
+            direction: [-0.3, -0.5, -0.6],  // Pointing down and to the side
+            _padding: 0,
+            color: [1.0, 1.0, 1.0],  // White light
+            _padding2: 0,
         }
     }
 }
@@ -133,6 +192,7 @@ struct State {
     max_instances: usize,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
+    light_bind_group: wgpu::BindGroup,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
 
@@ -245,7 +305,7 @@ impl State {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,  // Both shaders need uniforms
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -265,10 +325,42 @@ impl State {
             label: Some("uniform_bind_group"),
         });
 
+        // Light uniform buffer and bind group
+        let light_uniform = LightUniform::new();
+        let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Light Buffer"),
+            contents: bytemuck::cast_slice(&[light_uniform]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let light_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,  // Light is used in fragment shader
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("light_bind_group_layout"),
+            });
+
+        let light_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &light_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: light_buffer.as_entire_binding(),
+            }],
+            label: Some("light_bind_group"),
+        });
+
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&uniform_bind_group_layout],
+                bind_group_layouts: &[&uniform_bind_group_layout, &light_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -362,6 +454,7 @@ impl State {
             max_instances,
             uniform_buffer,
             uniform_bind_group,
+            light_bind_group,
             depth_texture,
             depth_view,
             world,
@@ -478,8 +571,9 @@ impl State {
 
         let camera_x = self.camera_angle.cos() * self.camera_distance;
         let camera_z = self.camera_angle.sin() * self.camera_distance;
+        let camera_pos = Vec3::new(camera_x, 8.0, camera_z);
         let view_matrix = Mat4::look_at_rh(
-            Vec3::new(camera_x, 8.0, camera_z),
+            camera_pos,
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::Y,
         );
@@ -487,6 +581,8 @@ impl State {
         let view_proj = projection * view_matrix;
         let uniforms = Uniforms {
             view_proj: view_proj.to_cols_array_2d(),
+            camera_pos: camera_pos.to_array(),
+            _padding: 0,
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
@@ -528,6 +624,7 @@ impl State {
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.light_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));  // Instance data
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
