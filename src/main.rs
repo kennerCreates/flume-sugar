@@ -5,10 +5,11 @@
 mod engine;
 
 use winit::{
-    event::{Event as WinitEvent, WindowEvent, ElementState, KeyEvent},
-    event_loop::EventLoop,
+    application::ApplicationHandler,
+    event::{WindowEvent, ElementState, KeyEvent},
+    event_loop::{EventLoop, ActiveEventLoop, ControlFlow},
     keyboard::{KeyCode, PhysicalKey},
-    window::Window,
+    window::{Window, WindowId},
 };
 use glam::{Mat4, Vec3};
 use bevy_ecs::prelude::*;
@@ -142,6 +143,12 @@ struct State {
     // Camera
     camera_distance: f32,
     camera_angle: f32,
+
+    // Debug tracking
+    frame_times: Vec<f32>,
+    last_fps_update: std::time::Instant,
+    fps_counter: u32,
+    current_fps: u32,
 }
 
 impl State {
@@ -361,6 +368,10 @@ impl State {
             last_update: std::time::Instant::now(),
             camera_distance: 15.0,
             camera_angle: 0.0,
+            frame_times: Vec::with_capacity(100),
+            last_fps_update: std::time::Instant::now(),
+            fps_counter: 0,
+            current_fps: 0,
         }
     }
 
@@ -567,64 +578,116 @@ fn spawn_test_entities(world: &mut World, count: usize) {
 // MAIN
 // ============================================================================
 
+struct App {
+    window: Option<std::sync::Arc<Window>>,
+    state: Option<State>,
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_none() {
+            let window_attributes = Window::default_attributes()
+                .with_title("Flume Sugar - Instanced Rendering Demo (1000 entities, 1 draw call!)")
+                .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+
+            let window = std::sync::Arc::new(
+                event_loop.create_window(window_attributes).unwrap()
+            );
+
+            let state = pollster::block_on(State::new(window.clone()));
+
+            self.window = Some(window);
+            self.state = Some(state);
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(window) = &self.window else { return };
+        let Some(state) = &mut self.state else { return };
+
+        match event {
+            WindowEvent::CloseRequested
+            | WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
+                ..
+            } => {
+                event_loop.exit();
+            }
+            WindowEvent::Resized(physical_size) => {
+                state.resize(physical_size);
+            }
+            WindowEvent::RedrawRequested => {
+                let frame_start = std::time::Instant::now();
+
+                state.update();
+                match state.render() {
+                    Ok(_) => {}
+                    Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
+                    Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
+                    Err(e) => eprintln!("{:?}", e),
+                }
+
+                // Track frame time
+                let frame_time = frame_start.elapsed().as_secs_f32();
+                state.frame_times.push(frame_time);
+                if state.frame_times.len() > 100 {
+                    state.frame_times.remove(0);
+                }
+
+                // Update FPS counter and window title
+                state.fps_counter += 1;
+                let now = std::time::Instant::now();
+                if (now - state.last_fps_update).as_secs_f32() >= 1.0 {
+                    state.current_fps = state.fps_counter;
+                    state.fps_counter = 0;
+                    state.last_fps_update = now;
+
+                    // Update window title with debug info
+                    let avg_frame_time = if !state.frame_times.is_empty() {
+                        state.frame_times.iter().sum::<f32>() / state.frame_times.len() as f32
+                    } else {
+                        0.0
+                    };
+                    let entity_count = state.world.query::<&Transform>().iter(&state.world).count();
+                    window.set_title(&format!(
+                        "Flume Sugar - {} FPS | {:.2} ms | {} entities | 1 draw call",
+                        state.current_fps,
+                        avg_frame_time * 1000.0,
+                        entity_count
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+}
+
 fn main() {
     env_logger::init();
 
     let event_loop = EventLoop::new().unwrap();
+    event_loop.set_control_flow(ControlFlow::Poll);
 
-    let window_attributes = Window::default_attributes()
-        .with_title("Flume Sugar - Instanced Rendering Demo (1000 entities, 1 draw call!)")
-        .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
+    let mut app = App {
+        window: None,
+        state: None,
+    };
 
-    let window = std::sync::Arc::new(event_loop.create_window(window_attributes).unwrap());
-
-    let mut state = pollster::block_on(State::new(window.clone()));
-    let mut frame_count = 0;
-    let mut last_fps_update = std::time::Instant::now();
-
-    event_loop.run(move |event, control_flow| {
-        match event {
-            WinitEvent::WindowEvent {
-                ref event,
-                window_id,
-            } if window_id == window.id() => match event {
-                WindowEvent::CloseRequested
-                | WindowEvent::KeyboardInput {
-                    event:
-                        KeyEvent {
-                            state: ElementState::Pressed,
-                            physical_key: PhysicalKey::Code(KeyCode::Escape),
-                            ..
-                        },
-                    ..
-                } => control_flow.exit(),
-                WindowEvent::Resized(physical_size) => {
-                    state.resize(*physical_size);
-                }
-                WindowEvent::RedrawRequested => {
-                    state.update();
-                    match state.render() {
-                        Ok(_) => {}
-                        Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
-                        Err(wgpu::SurfaceError::OutOfMemory) => control_flow.exit(),
-                        Err(e) => eprintln!("{:?}", e),
-                    }
-
-                    frame_count += 1;
-                    let now = std::time::Instant::now();
-                    if (now - last_fps_update).as_secs_f32() >= 1.0 {
-                        let entity_count = state.world.query::<&Transform>().iter(&state.world).count();
-                        println!("FPS: {} | Entities: {} | Draw calls: 1", frame_count, entity_count);
-                        frame_count = 0;
-                        last_fps_update = now;
-                    }
-                }
-                _ => {}
-            },
-            WinitEvent::AboutToWait => {
-                window.request_redraw();
-            }
-            _ => {}
-        }
-    }).unwrap();
+    event_loop.run_app(&mut app).unwrap();
 }

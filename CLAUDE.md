@@ -128,10 +128,12 @@ The application follows a standard wgpu rendering pipeline:
 - Fragment shader (`fs_main`): outputs interpolated vertex colors
 - Uses WGSL (WebGPU Shading Language) syntax
 
-**Event Handling** (main event loop):
-- Window events (close, resize, keyboard)
-- Redraw requests trigger update + render cycle
-- Uses deprecated `EventLoop::run()` API (winit 0.30)
+**Event Handling** (ApplicationHandler pattern):
+- Implements `ApplicationHandler` trait for event handling
+- `resumed()` - creates window and initializes state
+- `window_event()` - handles window events (close, resize, keyboard, redraw)
+- `about_to_wait()` - requests redraw for continuous rendering
+- Uses modern winit 0.30 API with `EventLoop::run_app()`
 
 ## Code Modification Patterns
 
@@ -167,6 +169,36 @@ The application follows a standard wgpu rendering pipeline:
 - **pollster 0.4**: Blocks on async wgpu initialization
 - **env_logger 0.11**: Optional logging for wgpu internals
 
+## Code Quality Standards
+
+### Warning-Free Builds
+
+**CRITICAL:** Before completing any task, ensure the build has zero warnings:
+
+```bash
+cargo build
+```
+
+**All compilation warnings must be resolved by:**
+1. **Removing unused code** - Delete imports, functions, structs, fields, or methods that aren't used
+2. **Using the code** - If it's meant to be used, implement its usage now
+
+**Do NOT:**
+- Leave warnings unaddressed
+- Suppress warnings with `#[allow(...)]` attributes
+- Complete a task with a build that shows warnings
+- Keep "future use" code that isn't currently needed
+
+**Keep the codebase clean:**
+- If you plan to add features later, document plans in todo lists or research docs
+- Add the code when you actually need it, not before
+- Trust that you can always add code back later when needed
+
+**Why this matters:**
+- Warnings indicate potential bugs, dead code, or API deprecations
+- Warning-free builds maintain code quality and prevent warning fatigue
+- Future changes are easier when the codebase starts clean
+
 ## Development Workflow
 
 ### Implementing a New System
@@ -188,6 +220,7 @@ The application follows a standard wgpu rendering pipeline:
    - Document any deviations from planned approach
 
 4. **Validation**
+   - **Verify warning-free build** (`cargo build` shows 0 warnings)
    - Test the implementation
    - Verify engine/game separation is maintained
    - Ensure documentation is accurate and complete
@@ -201,9 +234,4 @@ The application follows a standard wgpu rendering pipeline:
 
 ## Known Issues
 
-- Uses deprecated winit APIs (`EventLoop::run()`, `create_window()`)
-  - Warnings don't affect functionality
-  - Future: migrate to `EventLoop::run_app()` and `ActiveEventLoop::create_window()`
-- No depth buffer (depth_stencil: None)
-  - Back-face culling prevents visible Z-fighting
-  - Add depth buffer for more complex scenes with overlapping geometry
+None currently. The codebase builds with zero warnings.
