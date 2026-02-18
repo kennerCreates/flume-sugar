@@ -225,6 +225,13 @@ cargo build
    - Verify engine/game separation is maintained
    - Ensure documentation is accurate and complete
 
+5. **Commit to Git**
+   - Stage relevant files (`git add`)
+   - Create descriptive commit message following project style
+   - Include Co-Authored-By line for AI assistance
+   - Push to GitHub (`git push origin main`)
+   - **CRITICAL:** Commit after each feature implementation, not at end of session
+
 ### When Modifying Existing Systems
 
 1. Read relevant research doc first (if exists)
