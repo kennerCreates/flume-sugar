@@ -14,6 +14,7 @@ use winit::{
 use glam::{Mat4, Vec3};
 use bevy_ecs::prelude::*;
 use engine::{Transform, Velocity, Color as EntityColor};
+use engine::debug_overlay::{DebugOverlay, DebugStats};
 
 // ============================================================================
 // VERTEX DEFINITION
@@ -209,6 +210,9 @@ struct State {
     last_fps_update: std::time::Instant,
     fps_counter: u32,
     current_fps: u32,
+
+    // Debug overlay (egui)
+    debug_overlay: DebugOverlay,
 }
 
 impl State {
@@ -235,7 +239,7 @@ impl State {
         (texture, view)
     }
 
-    async fn new(window: std::sync::Arc<winit::window::Window>) -> Self {
+    async fn new(window: &std::sync::Arc<winit::window::Window>) -> Self {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -436,6 +440,9 @@ impl State {
         // Create depth texture
         let (depth_texture, depth_view) = Self::create_depth_texture(&device, &config);
 
+        // Create debug overlay
+        let debug_overlay = DebugOverlay::new(&window, &device, config.format);
+
         // Create ECS world and spawn test entities
         let mut world = World::new();
         spawn_test_entities(&mut world, 1000);
@@ -465,6 +472,7 @@ impl State {
             last_fps_update: std::time::Instant::now(),
             fps_counter: 0,
             current_fps: 0,
+            debug_overlay,
         }
     }
 
@@ -537,7 +545,7 @@ impl State {
         }
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+    fn render(&mut self, window: &winit::window::Window) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -633,6 +641,46 @@ impl State {
             render_pass.draw_indexed(0..self.num_indices, 0, 0..instance_count as u32);
         }
 
+        // Debug overlay (egui) — renders on top of 3D scene
+        if self.debug_overlay.visible {
+            let entity_count = self.world.query::<&Transform>().iter(&self.world).count();
+            let (avg, min, max) = if !self.frame_times.is_empty() {
+                let avg = self.frame_times.iter().sum::<f32>() / self.frame_times.len() as f32;
+                let min = self.frame_times.iter().copied().fold(f32::INFINITY, f32::min);
+                let max = self.frame_times.iter().copied().fold(0.0_f32, f32::max);
+                (avg, min, max)
+            } else {
+                (0.0, 0.0, 0.0)
+            };
+
+            let stats = DebugStats {
+                fps: self.current_fps,
+                frame_time_avg_ms: avg * 1000.0,
+                frame_time_min_ms: min * 1000.0,
+                frame_time_max_ms: max * 1000.0,
+                entity_count,
+                draw_calls: 1,
+                resolution: (self.config.width, self.config.height),
+                camera_distance: self.camera_distance,
+                camera_angle: self.camera_angle,
+            };
+
+            let screen_descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [self.config.width, self.config.height],
+                pixels_per_point: window.scale_factor() as f32,
+            };
+
+            self.debug_overlay.render(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                window,
+                &view,
+                &screen_descriptor,
+                &stats,
+            );
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
@@ -691,7 +739,7 @@ impl ApplicationHandler for App {
                 event_loop.create_window(window_attributes).unwrap()
             );
 
-            let state = pollster::block_on(State::new(window.clone()));
+            let state = pollster::block_on(State::new(&window));
 
             self.window = Some(window);
             self.state = Some(state);
@@ -707,6 +755,9 @@ impl ApplicationHandler for App {
         let Some(window) = &self.window else { return };
         let Some(state) = &mut self.state else { return };
 
+        // Forward events to egui
+        let _ = state.debug_overlay.handle_window_event(window, &event);
+
         match event {
             WindowEvent::CloseRequested
             | WindowEvent::KeyboardInput {
@@ -720,6 +771,17 @@ impl ApplicationHandler for App {
             } => {
                 event_loop.exit();
             }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::F3),
+                        ..
+                    },
+                ..
+            } => {
+                state.debug_overlay.toggle();
+            }
             WindowEvent::Resized(physical_size) => {
                 state.resize(physical_size);
             }
@@ -727,7 +789,7 @@ impl ApplicationHandler for App {
                 let frame_start = std::time::Instant::now();
 
                 state.update();
-                match state.render() {
+                match state.render(window) {
                     Ok(_) => {}
                     Err(wgpu::SurfaceError::Lost) => state.resize(state.size),
                     Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),

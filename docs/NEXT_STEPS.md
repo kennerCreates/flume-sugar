@@ -1,192 +1,32 @@
 # Next Steps - Immediate Action Plan
 
-**Date:** 2026-02-17
-**Status:** Phase 1 - Week 1 Complete! 🎉
+**Last Updated:** 2026-02-18
+**Status:** Phase 1 - Weeks 1-2 Complete
 
-## Documentation Complete ✅
+## Completed
 
-- ✅ [GAME_DESIGN.md](./GAME_DESIGN.md) - Complete game vision
-- ✅ [engine-requirements.md](./research/engine-requirements.md) - All engine systems mapped
-- ✅ [rendering-architecture.md](./research/rendering-architecture.md) - Why wgpu
-- ✅ [ecs-choice.md](./research/ecs-choice.md) - ECS research and decision
-- ✅ [CLAUDE.md](../CLAUDE.md) - Development guidelines
-- ✅ Testing strategy decided (balanced approach)
+### Week 1: ECS & Rendering Foundation
+- bevy_ecs integration with Transform, Velocity, Color components
+- Instanced rendering pipeline (1000 entities, 1 draw call, 60 FPS)
+- Blinn-Phong lighting with directional light
+- Depth buffer for proper 3D occlusion
+- Movement and bounds systems
 
-## Design Decisions Made ✅
-
-1. **Art Style:** PA-style + organic aesthetic (2-3 subdivision levels)
-2. **Unit Count Target:** 500-1000+ units (bevy_ecs chosen for performance)
-3. **Map Size:** ~128x128 tiles (medium-sized)
-4. **Abilities:** Modular system (1 attack + 1 secondary, swappable pre-game)
-5. **Terrain:** TBD (will decide when implementing terrain system)
-6. **Fog of War:** TBD (post-MVP)
+### Week 2: Debug Overlay (egui)
+- Integrated egui (0.30) as the UI system (egui-wgpu + egui-winit)
+- In-game debug overlay toggled with F3
+- Displays: FPS, frame time (avg/min/max), entity count, draw calls, resolution, camera info
+- Styled with semi-transparent black panel, small white monospace font
+- egui will also serve as the foundation for the future player HUD
 
 ---
 
-## Phase 1: Engine Foundation (IN PROGRESS)
+## Up Next: Camera & Input
 
-### Week 1: ECS Research & Implementation ✅ COMPLETE
-
-**Completed Tasks:**
-1. ✅ Research ECS options
-   - Created `docs/research/ecs-choice.md`
-   - Analyzed bevy_ecs, hecs, specs, custom
-   - **Decision:** bevy_ecs (best performance, flexible, determinism achievable)
-
-2. ✅ Integrate bevy_ecs
-   - Added to `Cargo.toml`
-   - Created `src/engine/` module structure
-   - Implemented components (Transform, Velocity, Color, Lifetime)
-   - Implemented systems (movement, bounds, lifetime)
-
-3. ✅ Tested with 1000 entities
-   - Spawned 1000 colored cubes
-   - Movement system working
-   - Bounds wrapping working
-   - Instanced rendering: **1 draw call for all entities**
-   - **Performance: 60 FPS @ 1000 entities**
-
-**Success Criteria Met:**
-- ✅ Can spawn/despawn entities
-- ✅ Components work correctly
-- ✅ Systems update in order
-- ✅ 1000+ entities at 60 FPS
-- ✅ **BONUS:** Instanced rendering optimized
-
----
-
-### Week 2: Camera & Input
+The natural next step. With ECS, rendering, and debug tools working, we need camera controls to navigate the scene.
 
 **Tasks:**
-1. Research camera implementation
-   - Create `docs/research/camera-system.md`
-   - RTS camera math (perspective with low FOV)
-   - Screen-to-world ray casting for mouse picking
-
-2. Implement RTS Camera
-   - Create `src/engine/camera.rs`
-   - Perspective projection (configurable FOV)
-   - View matrix on X/Z plane only
-   - Edge scrolling + WASD movement
-   - Zoom in/out
-   - Map bounds clamping
-
-3. Input System
-   - Create `src/engine/input.rs`
-   - Mouse state tracking (position, buttons, wheel)
-   - Keyboard state tracking (keys down, just pressed)
-   - Integration with winit events
-
-4. Update rendering to use camera
-   - Pass camera view+projection to shaders
-   - Free camera movement
-
-**Success Criteria:**
-- Camera moves smoothly around scene
-- Can zoom in/out
-- Camera clamped to bounds
-- Input feels responsive
-
----
-
-### Week 3: Debug Tools
-
-**Tasks:**
-1. Debug Renderer
-   - Create `src/engine/debug.rs`
-   - Draw 3D lines (for paths, bounds)
-   - Draw 3D boxes (for collision volumes)
-   - Draw 3D spheres
-   - Draw 2D text overlays (for labels)
-
-2. Profiler
-   - Create `src/engine/profiler.rs`
-   - Track system execution times
-   - Frame time tracking
-   - Memory usage (entity count, component count)
-   - Display as overlay
-
-3. FPS Counter
-   - Simple frame time display
-   - Frame time graph (last 100 frames)
-
-4. Console (Basic)
-   - Text input overlay
-   - Command parsing (spawn entity, etc.)
-   - Command registration system
-
-**Success Criteria:**
-- Can see FPS and frame time
-- Can profile ECS systems
-- Can spawn entities via console
-- Debug visualization helps development
-
----
-
-### Phase 1 Deliverable
-
-**Demo:**
-- Free camera flying around 3D space
-- Press key to spawn colored cubes
-- FPS counter shows performance
-- Console command: `spawn cube 100` creates 100 cubes
-- Debug overlay shows entity count
-- Smooth 60 FPS with 1000+ entities
-
----
-
-## Research Documents to Create
-
-Priority order:
-
-1. **HIGH:** `docs/research/ecs-choice.md` (Week 1)
-   - Compare bevy_ecs, hecs, specs
-   - Determinism support
-   - Performance characteristics
-   - Make decision
-
-2. **HIGH:** `docs/research/camera-system.md` (Week 2)
-   - RTS camera math
-   - Ray casting for mouse picking
-   - Frustum culling (optional)
-
-3. **MEDIUM:** `docs/research/procedural-modeling.md` (Week 4-6)
-   - Skin modifier algorithm research
-   - Subdivision surface algorithms (Catmull-Clark vs Loop)
-   - Mesh generation pipeline
-   - Caching strategy
-
-4. **MEDIUM:** `docs/research/pathfinding.md` (Week 10-12)
-   - A* vs Flowfields
-   - Steering behaviors
-   - Dynamic obstacles
-
-5. **LOW:** `docs/research/ui-system.md` (Week 14+)
-   - egui vs custom
-   - UI architecture
-
-6. **LOW:** `docs/research/determinism-and-replays.md` (Week 27+)
-   - Fixed timestep
-   - Deterministic math
-   - Replay file format
-
----
-
-## Immediate Next Steps (Current Sprint)
-
-**Status:** Week 1 complete, ready for Week 2!
-
-### Recommended: Week 2 - Camera & Input
-
-This is the natural next step. With ECS and rendering working, we need camera controls to navigate the scene.
-
-**Tasks:**
-1. **Add depth buffer** (Quick win!)
-   - Currently cubes have no depth testing (back faces visible)
-   - Add depth texture and depth stencil state
-   - ~1 hour task
-
-2. **Implement RTS Camera**
+1. **RTS Camera System**
    - Create `src/engine/camera.rs`
    - Perspective projection (low FOV 15-25°)
    - Planar movement (X/Z only, fixed height)
@@ -195,44 +35,46 @@ This is the natural next step. With ECS and rendering working, we need camera co
    - Edge scrolling (optional for now)
    - Map bounds clamping
 
-3. **Input System**
+2. **Input System**
    - Create `src/engine/input.rs`
-   - Mouse position tracking
-   - Keyboard state tracking
+   - Mouse state tracking (position, buttons, wheel)
+   - Keyboard state tracking (keys down, just pressed)
    - Integration with winit events
 
+3. **Update rendering to use camera**
+   - Refactor camera uniforms out of render() into camera system
+   - Screen-to-world ray casting for future mouse picking
+
 **Success Criteria:**
-- ✅ Camera moves smoothly with WASD
-- ✅ Zoom in/out works
-- ✅ Camera clamped to bounds
-- ✅ Depth testing prevents visual artifacts
-
-**Estimated Time:** 1-2 days
+- Camera moves smoothly with WASD
+- Zoom in/out works
+- Camera clamped to map bounds
+- Input feels responsive
 
 ---
 
-## Alternative Next Steps
+## Future Priorities
 
-### Option B: Debug Tools First
-Before camera, add FPS counter, profiler, and debug rendering. Makes development easier going forward.
+| Priority | System | Notes |
+|----------|--------|-------|
+| HIGH | Procedural modeling (skin + subdivision) | Core visual identity — biggest technical risk |
+| HIGH | Pathfinding (A* or flowfield) | Essential for RTS unit movement |
+| MEDIUM | Terrain/map rendering | Ground plane, 128x128 tile grid |
+| MEDIUM | Selection & commands | Click-to-select, right-click-to-move |
+| MEDIUM | Combat & resource systems | Core RTS gameplay loop |
+| MEDIUM | Animation system | Procedural + baked animations |
+| LOW | Audio | Sound effects and music |
+| LOW | Save/load & replays | Deterministic simulation |
 
-### Option C: Procedural Modeling Research
-Jump ahead to the unique system. Research skin modifier and subdivision surface algorithms.
+## Research Documents
 
-### Option D: Polish Current State
-Fix compiler warnings, add tests, refactor for cleaner code, improve documentation.
-
----
-
-## Recommendation
-
-**Start Week 2: Camera & Input**
-
-Reasons:
-1. Natural progression (ECS → Rendering → Camera → Gameplay)
-2. Makes testing and development much easier
-3. Depth buffer is a quick win that improves visuals
-4. RTS camera is core to the game feel
-5. Keeps momentum going with visible progress
-
-Let me know when you're ready to proceed! 🚀
+| Status | Document | Topic |
+|--------|----------|-------|
+| Done | [ecs-choice.md](./research/ecs-choice.md) | ECS comparison and decision |
+| Done | [rendering-architecture.md](./research/rendering-architecture.md) | Why wgpu |
+| Done | [engine-requirements.md](./research/engine-requirements.md) | All engine systems mapped |
+| Done | [lighting-implementation.md](./research/lighting-implementation.md) | Blinn-Phong lighting |
+| Done | [ui-system.md](./research/ui-system.md) | UI approach — egui chosen |
+| TODO | camera-system.md | RTS camera math, ray casting |
+| TODO | procedural-modeling.md | Skin modifier, subdivision surfaces |
+| TODO | pathfinding.md | A* vs flowfields, steering |

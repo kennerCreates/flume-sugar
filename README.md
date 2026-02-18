@@ -12,32 +12,32 @@ An RTS in the style of StarCraft 2's campaign, with:
 
 ## Current Status
 
-🚧 **Early Development** - Engine foundation in progress
+**Phase 1 - Engine Foundation** (in progress)
 
 **Implemented:**
-- ✅ Basic wgpu rendering pipeline
-- ✅ ECS integration (bevy_ecs)
-- ✅ Entity spawning and management
-- ✅ Basic movement and bounds systems
-- ✅ Instanced rendering (1000 entities in 1 draw call @ 60 FPS)
-- ✅ Per-entity transforms and colors
+- Instanced rendering pipeline (1000 entities, 1 draw call, 60 FPS)
+- ECS integration (bevy_ecs) with Transform, Velocity, Color components
+- Movement and bounds systems
+- Blinn-Phong lighting with directional light
+- Depth buffer for proper 3D occlusion
+- In-game debug overlay (egui) — toggle with F3
+  - FPS, frame time (avg/min/max), entity count, draw calls, resolution, camera info
 
 **Next up:**
-- ⬜ RTS-style camera system (WASD, edge scrolling, zoom)
-- ⬜ Depth buffer for proper 3D occlusion
-- ⬜ Procedural modeling system (skin + subdivision)
+- RTS camera system (WASD, edge scrolling, zoom)
+- Input system (mouse + keyboard state tracking)
+- Procedural modeling system (skin + subdivision)
 
 ## Build & Run
 
 ```bash
-# Debug build
-cargo build
-cargo run
-
-# Release build (much faster!)
-cargo build --release
-cargo run --release
+cargo run           # debug build
+cargo run --release # release build (much faster)
 ```
+
+**Controls:**
+- **F3** — Toggle debug overlay
+- **Escape** — Quit
 
 **Requirements:**
 - Rust 1.93+ (edition 2024)
@@ -48,55 +48,39 @@ cargo run --release
 ```
 flume_sugar/
 ├── docs/
-│   ├── CLAUDE.md              # Development guidelines
 │   ├── GAME_DESIGN.md         # Game vision and design
 │   ├── DESIGN_DECISIONS.md    # Locked-in technical decisions
 │   ├── NEXT_STEPS.md          # Immediate action plan
 │   └── research/              # Technical research documents
-│       ├── rendering-architecture.md
 │       ├── ecs-choice.md
-│       └── engine-requirements.md
+│       ├── rendering-architecture.md
+│       ├── engine-requirements.md
+│       └── lighting-implementation.md
 ├── src/
 │   ├── engine/                # Reusable engine components
-│   │   ├── components.rs      # ECS components (Transform, Velocity, etc.)
-│   │   ├── systems.rs         # ECS systems (movement, etc.)
+│   │   ├── components.rs      # ECS components (Transform, Velocity, Color)
+│   │   ├── debug_overlay.rs   # In-game debug UI (egui)
+│   │   ├── systems.rs         # ECS systems (placeholder)
 │   │   └── mod.rs
 │   ├── main.rs                # Application entry point
-│   └── shader_instanced.wgsl  # GPU shaders with instancing (WGSL)
+│   └── shader_instanced.wgsl  # GPU shaders with instancing + lighting
 └── Cargo.toml
 ```
-
-## Design Philosophy
-
-**Engine vs Game Separation:**
-- `src/engine/` - Reusable, game-agnostic systems
-- `src/game/` - (future) Game-specific logic and content
-- Goal: Reuse engine for future games without modification
-
-**Research-Driven Development:**
-- Major decisions documented in `docs/research/`
-- Avoid re-researching solved problems
-- Preserve context and rationale
-
-**Balanced Testing:**
-- Unit tests for algorithms (pathfinding, collision, determinism)
-- Manual testing for graphics and gameplay
-- Performance benchmarks for critical systems
 
 ## Technology Stack
 
 - **Graphics:** wgpu 23.0 (cross-platform, modern API)
 - **ECS:** bevy_ecs 0.15 (high-performance entity management)
+- **UI:** egui 0.30 (immediate-mode GUI, debug overlay + future HUD)
 - **Math:** glam 0.29 (vectors, matrices, quaternions)
 - **Windowing:** winit 0.30
 - **Language:** Rust (edition 2024)
 
-## Documentation
+## Design Philosophy
 
-See `docs/` for detailed documentation:
-- [CLAUDE.md](docs/CLAUDE.md) - How to work with this codebase
-- [GAME_DESIGN.md](docs/GAME_DESIGN.md) - Full game design document
-- [engine-requirements.md](docs/research/engine-requirements.md) - All engine systems planned
+- **Engine vs Game separation** — `src/engine/` is reusable and game-agnostic; game-specific logic will live in `src/game/`
+- **Research-driven** — Major decisions documented in `docs/research/` to preserve context
+- **Balanced testing** — Unit tests for algorithms, manual testing for graphics, benchmarks for critical paths
 
 ## Performance Targets
 
@@ -105,16 +89,8 @@ See `docs/` for detailed documentation:
 - **2-3 subdivision levels** for procedural models
 - Deterministic simulation for replays
 
-## License
+## Documentation
 
-TBD (Not yet licensed)
-
-## Development
-
-This is a learning project and personal game engine. Development is iterative with heavy documentation of decisions and research.
-
-**Current Phase:** Phase 1 - Engine Foundation (ECS, rendering, camera)
-
----
-
-Built with 🦀 Rust and ❤️
+- [GAME_DESIGN.md](docs/GAME_DESIGN.md) - Full game design document
+- [NEXT_STEPS.md](docs/NEXT_STEPS.md) - Current roadmap and priorities
+- [engine-requirements.md](docs/research/engine-requirements.md) - All engine systems planned
