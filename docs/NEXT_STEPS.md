@@ -1,7 +1,7 @@
 # Next Steps - Immediate Action Plan
 
 **Last Updated:** 2026-02-18
-**Status:** Phase 1 - Weeks 1-2 Complete
+**Status:** Phase 1 - Weeks 1-3 Complete
 
 ## Completed
 
@@ -19,37 +19,13 @@
 - Styled with semi-transparent black panel, small white monospace font
 - egui will also serve as the foundation for the future player HUD
 
----
-
-## Up Next: Camera & Input
-
-The natural next step. With ECS, rendering, and debug tools working, we need camera controls to navigate the scene.
-
-**Tasks:**
-1. **RTS Camera System**
-   - Create `src/engine/camera.rs`
-   - Perspective projection (low FOV 15-25°)
-   - Planar movement (X/Z only, fixed height)
-   - WASD movement
-   - Mouse wheel zoom
-   - Edge scrolling (optional for now)
-   - Map bounds clamping
-
-2. **Input System**
-   - Create `src/engine/input.rs`
-   - Mouse state tracking (position, buttons, wheel)
-   - Keyboard state tracking (keys down, just pressed)
-   - Integration with winit events
-
-3. **Update rendering to use camera**
-   - Refactor camera uniforms out of render() into camera system
-   - Screen-to-world ray casting for future mouse picking
-
-**Success Criteria:**
-- Camera moves smoothly with WASD
-- Zoom in/out works
-- Camera clamped to map bounds
-- Input feels responsive
+### Week 3: Camera & Input
+- `src/engine/input.rs` — `InputState` for keyboard/mouse/scroll tracking from winit events
+- `src/engine/camera.rs` — `RtsCamera` with WASD pan, mouse wheel zoom, edge scrolling, bounds clamping
+- 20° FOV perspective projection (RTS isometric feel), 55° fixed pitch
+- Camera moves relative to its facing direction (yaw-aware WASD)
+- Refactored camera uniforms out of inline render() into `RtsCamera` methods
+- Debug overlay updated to show camera target position, distance, and zoom %
 
 ---
 
@@ -75,6 +51,6 @@ The natural next step. With ECS, rendering, and debug tools working, we need cam
 | Done | [engine-requirements.md](./research/engine-requirements.md) | All engine systems mapped |
 | Done | [lighting-implementation.md](./research/lighting-implementation.md) | Blinn-Phong lighting |
 | Done | [ui-system.md](./research/ui-system.md) | UI approach — egui chosen |
-| TODO | camera-system.md | RTS camera math, ray casting |
+| Done | camera-system.md | RTS camera math, ray casting |
 | TODO | procedural-modeling.md | Skin modifier, subdivision surfaces |
 | TODO | pathfinding.md | A* vs flowfields, steering |

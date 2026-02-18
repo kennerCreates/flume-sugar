@@ -8,8 +8,9 @@ pub struct DebugStats {
     pub entity_count: usize,
     pub draw_calls: u32,
     pub resolution: (u32, u32),
+    pub camera_target: (f32, f32),
     pub camera_distance: f32,
-    pub camera_angle: f32,
+    pub camera_zoom_pct: f32,
 }
 
 pub struct DebugOverlay {
@@ -111,8 +112,9 @@ impl DebugOverlay {
                                 stats.resolution.0, stats.resolution.1
                             ));
                             ui.label(format!(
-                                "Camera: dist {:.1}  angle {:.2}",
-                                stats.camera_distance, stats.camera_angle
+                                "Camera: ({:.1}, {:.1})  dist {:.1}  zoom {:.0}%",
+                                stats.camera_target.0, stats.camera_target.1,
+                                stats.camera_distance, stats.camera_zoom_pct
                             ));
                         });
                 });

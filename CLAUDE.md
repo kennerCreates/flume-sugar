@@ -31,6 +31,10 @@ cargo run --release
 ```
 
 **Controls:**
+- WASD — pan camera
+- Mouse wheel — zoom in/out
+- Mouse edge scroll — pan camera (move mouse to screen edge)
+- F3 — toggle debug overlay
 - ESC or close window to exit
 - Window resizing is supported
 
@@ -85,6 +89,47 @@ cargo run --release
 
 ## Architecture
 
+### Module Structure
+
+```
+src/
+  main.rs              — App entry point, State struct, winit event loop
+  engine/
+    mod.rs             — Module registration and re-exports
+    camera.rs          — RtsCamera: RTS-style camera with WASD/zoom/edge-scroll
+    components.rs      — ECS components (Transform, Velocity, Color)
+    debug_overlay.rs   — egui debug overlay (F3)
+    input.rs           — InputState: keyboard and mouse state from winit events
+    systems.rs         — ECS systems (placeholder)
+```
+
+### Camera System (`src/engine/camera.rs`)
+
+`RtsCamera` implements a top-down RTS camera:
+- **Target**: A `Vec2` point on the XZ ground plane the camera orbits around
+- **Pitch/Yaw**: Fixed elevation (55°) and horizontal rotation (0 = facing -Z)
+- **Distance**: Adjustable zoom between `min_distance` and `max_distance`
+- **FOV**: Low field of view (20°) for isometric-style perspective
+- **Movement**: WASD pans the target on XZ relative to camera facing direction
+- **Zoom**: Mouse wheel adjusts distance
+- **Edge scrolling**: Mouse near screen edges pans the target
+- **Bounds**: Target is clamped to configurable XZ map bounds
+
+Key methods:
+- `update(input, dt)` — call once per frame in `State::update()`
+- `view_projection(aspect)` — combined VP matrix for GPU uniform
+- `camera_position()` — eye position for lighting uniform
+
+### Input System (`src/engine/input.rs`)
+
+`InputState` centralizes winit event processing:
+- `process_event(event)` — call for every `WindowEvent` before game logic
+- `end_frame()` — call after update+render to reset per-frame accumulators
+- `is_key_held(KeyCode)` — query keyboard state
+- `scroll_delta` — accumulated vertical scroll this frame
+- `mouse_position`, `mouse_delta` — cursor position and movement
+- `window_size` — used for edge scroll boundary detection
+
 ### Graphics Pipeline Flow
 
 The application follows a standard wgpu rendering pipeline:
@@ -98,9 +143,9 @@ The application follows a standard wgpu rendering pipeline:
    - Sets up uniform buffer for transformation matrices
 
 2. **Update Loop** (`State::update()`)
-   - Increments rotation angle
-   - Computes transformation matrix (Model × View × Projection)
-   - Uploads updated uniforms to GPU via `queue.write_buffer()`
+   - Updates `RtsCamera` via `camera.update(&input, dt)` (WASD, zoom, edge scroll)
+   - Runs ECS movement and bounds systems
+   - Camera uniform upload happens at the start of `render()` (reads final camera state)
 
 3. **Render Loop** (`State::render()`)
    - Acquires surface texture
@@ -117,11 +162,11 @@ The application follows a standard wgpu rendering pipeline:
 - 36 indices (6 faces × 2 triangles × 3 vertices) defining triangle topology
 - Counter-clockwise winding order for front faces
 
-**Transformation Pipeline** (`Uniforms::update_transform()`):
-- Model matrix: rotates cube on Y and X axes
-- View matrix: translates camera -3 units on Z axis
-- Projection matrix: perspective with 45° FOV, aspect ratio 800/600
-- Combined as: `projection * view * model`
+**Transformation Pipeline** (`RtsCamera`):
+- View matrix: `look_at_rh(eye, target, Y)` — eye computed from pitch/yaw/distance offset
+- Projection matrix: perspective with 20° FOV (RTS isometric feel), aspect-ratio aware
+- Combined as: `projection * view` uploaded as `Uniforms.view_proj`
+- Per-instance model transform is the entity's `Transform.position` in the instance buffer
 
 **Shaders** (`src/shader.wgsl`):
 - Vertex shader (`vs_main`): applies transformation matrix, passes through color
@@ -151,9 +196,11 @@ The application follows a standard wgpu rendering pipeline:
 - Change rotation increment in `State::update()` (currently `0.01`)
 - Modify rotation axes in `Mat4::from_rotation_*()` calls
 
-**To move camera:**
-- Edit `Vec3::new(0.0, 0.0, -3.0)` in view matrix calculation
-- Adjust FOV or aspect ratio in perspective matrix
+**To adjust camera behavior:**
+- Edit `RtsCamera::new()` defaults in `src/engine/camera.rs` (speed, FOV, pitch, bounds)
+- `move_speed` / `edge_scroll_speed` control pan speed in world units/sec
+- `zoom_speed` controls how many distance units per scroll line
+- `pitch` controls elevation angle (55° = good RTS view, 90° = straight down)
 
 **To add more complex geometry:**
 - Extend `Vertex` struct with additional attributes (normals, UVs)

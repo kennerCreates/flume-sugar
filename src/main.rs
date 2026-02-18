@@ -14,7 +14,9 @@ use winit::{
 use glam::{Mat4, Vec3};
 use bevy_ecs::prelude::*;
 use engine::{Transform, Velocity, Color as EntityColor};
+use engine::camera::RtsCamera;
 use engine::debug_overlay::{DebugOverlay, DebugStats};
+use engine::input::InputState;
 
 // ============================================================================
 // VERTEX DEFINITION
@@ -201,9 +203,9 @@ struct State {
     world: World,
     last_update: std::time::Instant,
 
-    // Camera
-    camera_distance: f32,
-    camera_angle: f32,
+    // Camera & Input
+    camera: RtsCamera,
+    input: InputState,
 
     // Debug tracking
     frame_times: Vec<f32>,
@@ -466,8 +468,12 @@ impl State {
             depth_view,
             world,
             last_update: std::time::Instant::now(),
-            camera_distance: 15.0,
-            camera_angle: 0.0,
+            camera: RtsCamera::new(),
+            input: {
+                let mut input = InputState::new();
+                input.window_size = (size.width, size.height);
+                input
+            },
             frame_times: Vec::with_capacity(100),
             last_fps_update: std::time::Instant::now(),
             fps_counter: 0,
@@ -495,7 +501,7 @@ impl State {
         let dt = (now - self.last_update).as_secs_f32();
         self.last_update = now;
 
-        self.camera_angle += 0.2 * dt;
+        self.camera.update(&self.input, dt);
 
         // Update ECS systems
         let bounds = Vec3::new(20.0, 10.0, 20.0);
@@ -575,21 +581,9 @@ impl State {
 
         // Update camera uniforms
         let aspect = self.size.width as f32 / self.size.height as f32;
-        let projection = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
-
-        let camera_x = self.camera_angle.cos() * self.camera_distance;
-        let camera_z = self.camera_angle.sin() * self.camera_distance;
-        let camera_pos = Vec3::new(camera_x, 8.0, camera_z);
-        let view_matrix = Mat4::look_at_rh(
-            camera_pos,
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::Y,
-        );
-
-        let view_proj = projection * view_matrix;
         let uniforms = Uniforms {
-            view_proj: view_proj.to_cols_array_2d(),
-            camera_pos: camera_pos.to_array(),
+            view_proj: self.camera.view_projection(aspect).to_cols_array_2d(),
+            camera_pos: self.camera.camera_position().to_array(),
             _padding: 0,
         };
 
@@ -661,8 +655,9 @@ impl State {
                 entity_count,
                 draw_calls: 1,
                 resolution: (self.config.width, self.config.height),
-                camera_distance: self.camera_distance,
-                camera_angle: self.camera_angle,
+                camera_target: (self.camera.target.x, self.camera.target.y),
+                camera_distance: self.camera.distance,
+                camera_zoom_pct: self.camera.zoom_fraction() * 100.0,
             };
 
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
@@ -755,8 +750,9 @@ impl ApplicationHandler for App {
         let Some(window) = &self.window else { return };
         let Some(state) = &mut self.state else { return };
 
-        // Forward events to egui
+        // Forward events to egui and input system
         let _ = state.debug_overlay.handle_window_event(window, &event);
+        state.input.process_event(&event);
 
         match event {
             WindowEvent::CloseRequested
@@ -825,6 +821,8 @@ impl ApplicationHandler for App {
                         entity_count
                     ));
                 }
+
+                state.input.end_frame();
             }
             _ => {}
         }
