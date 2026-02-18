@@ -14,7 +14,7 @@ This ensures future Claude instances don't waste time rediscovering context or r
 
 ## Project Overview
 
-Flume Sugar is a 3D game project built with Rust and wgpu. The project is structured to separate reusable engine components from game-specific code, allowing the engine to be reused for future games without modification.
+Flume Sugar is a 3D RTS game built with Rust and wgpu. Code is organized into modules under `src/` by system (camera, input, rendering, etc.). If code proves reusable in a future project, it can be extracted then — don't design for reuse upfront.
 
 ## Build & Run
 
@@ -40,50 +40,23 @@ cargo run --release
 
 ## Code Organization Philosophy
 
-### Engine vs Game Separation
-
-**Engine code** (reusable, game-agnostic):
-- Rendering system (wgpu pipeline, shaders, vertex/index management)
-- ECS (Entity Component System) - when implemented
-- Input handling abstractions
-- Resource management (textures, models, audio)
-- Physics integration
-- Scene graph / transform hierarchy
-- Camera systems
-- Core utilities and math
-
-**Game code** (specific to current game):
-- Game logic and rules
-- Specific entity behaviors and components
-- Level data and progression
-- UI layouts and menus specific to this game
-- Game-specific assets and configuration
-
-**Implementation strategy:**
-- Currently all code is in `src/main.rs` (bootstrap phase)
-- As systems grow, split into modules: `src/engine/` and `src/game/`
-- Consider separate crates (`flume_engine` and `flume_game`) if reusability becomes important
-- Engine code should never depend on game code
-- Game code can freely use engine APIs
+Code is organized by system under `src/`. Use `src/engine/` for lower-level systems (rendering, input, camera) and `main.rs` for higher-level game logic. Move code when the current location becomes inconvenient — not in advance. If code proves useful in a future project, extract it then.
 
 ### Research Documentation
 
 **Location:** `docs/research/` directory
 
-**Format:** Create a markdown file for each major system or technical decision.
+**When to write one:** Only when making a genuine architectural choice between meaningfully different approaches — where the decision isn't obvious and future-you would benefit from knowing why this option was chosen over others. If there's essentially one sensible approach, skip the research doc.
 
-**Required contents:**
+**Good candidates:** ECS library selection, rendering API choice, UI framework, pathfinding algorithm, networking model.
+**Skip for:** Implementing a well-understood system (RTS camera, input state), adding a feature with no real alternatives.
+
+**Format when you do write one:**
 - **Problem statement**: What are we trying to solve?
 - **Options considered**: List alternatives with pros/cons
 - **Decision**: What approach was chosen and why
 - **Implementation notes**: Key insights, gotchas, performance considerations
 - **References**: Links to articles, documentation, examples used
-
-**Example topics:**
-- `docs/research/rendering-architecture.md` - wgpu pipeline design decisions
-- `docs/research/ecs-choice.md` - Which ECS library to use (bevy_ecs, hecs, specs, custom)
-- `docs/research/asset-pipeline.md` - How to load and manage assets
-- `docs/research/physics-integration.md` - Which physics engine and integration approach
 
 **Purpose:** Avoid re-researching the same topics. When revisiting a system, read the research doc first to understand the context and rationale for current implementation.
 
@@ -137,7 +110,7 @@ The application follows a standard wgpu rendering pipeline:
 1. **Initialization** (`State::new()`)
    - Creates wgpu instance, adapter, device, and queue
    - Configures surface for window rendering
-   - Loads and compiles WGSL shaders from `src/shader.wgsl`
+   - Loads and compiles WGSL shaders from `src/shader_instanced.wgsl`
    - Creates render pipeline with vertex/fragment shader stages
    - Initializes vertex and index buffers with cube geometry
    - Sets up uniform buffer for transformation matrices
@@ -157,8 +130,8 @@ The application follows a standard wgpu rendering pipeline:
 
 ### Key Components
 
-**Geometry** (`VERTICES` and `INDICES` constants):
-- 8 vertices defining cube corners with position and color attributes
+**Geometry** (`CUBE_VERTICES` and `CUBE_INDICES` constants):
+- 24 vertices (4 per face) with position and normal attributes — duplicated per face for flat shading
 - 36 indices (6 faces × 2 triangles × 3 vertices) defining triangle topology
 - Counter-clockwise winding order for front faces
 
@@ -168,9 +141,9 @@ The application follows a standard wgpu rendering pipeline:
 - Combined as: `projection * view` uploaded as `Uniforms.view_proj`
 - Per-instance model transform is the entity's `Transform.position` in the instance buffer
 
-**Shaders** (`src/shader.wgsl`):
-- Vertex shader (`vs_main`): applies transformation matrix, passes through color
-- Fragment shader (`fs_main`): outputs interpolated vertex colors
+**Shaders** (`src/shader_instanced.wgsl`):
+- Vertex shader (`vs_main`): applies view-projection matrix, passes normal for lighting
+- Fragment shader (`fs_main`): Blinn-Phong shading using instance color
 - Uses WGSL (WebGPU Shading Language) syntax
 
 **Event Handling** (ApplicationHandler pattern):
@@ -183,18 +156,13 @@ The application follows a standard wgpu rendering pipeline:
 ## Code Modification Patterns
 
 **When adding new features, always ask:**
-1. Is this engine code or game code?
-2. If engine code, could it be reused in a different game?
-3. Does this require research? If yes, document findings in `docs/research/`
-4. After implementation, does CLAUDE.md need updating?
+1. Where does this naturally live? (`src/engine/` for low-level systems, `main.rs` for game logic)
+2. Is this a genuine architectural choice? If yes, consider a research doc in `docs/research/`
+3. After implementation, does CLAUDE.md need updating?
 
 **To change cube appearance:**
-- Modify `VERTICES` array for different colors or size
-- Edit `INDICES` for different topology
-
-**To adjust animation:**
-- Change rotation increment in `State::update()` (currently `0.01`)
-- Modify rotation axes in `Mat4::from_rotation_*()` calls
+- Modify `CUBE_VERTICES` array for different size (currently 0.1 unit half-extent)
+- Edit `CUBE_INDICES` for different topology
 
 **To adjust camera behavior:**
 - Edit `RtsCamera::new()` defaults in `src/engine/camera.rs` (speed, FOV, pitch, bounds)
@@ -227,50 +195,39 @@ cargo build
 ```
 
 **All compilation warnings must be resolved by:**
-1. **Removing unused code** - Delete imports, functions, structs, fields, or methods that aren't used
-2. **Using the code** - If it's meant to be used, implement its usage now
+1. **Removing the unused code** - Delete imports, functions, fields, or methods that aren't used
+2. **Using the code** - If it's genuinely needed now, wire it up
+
+**Note on binary crates:** This project compiles as a binary, not a library. Rust warns about unused `pub` methods in binary crates just as it does for private ones — `pub` only exempts from dead_code warnings in library crates (where external consumers might call it). So "keep it because it's pub" doesn't work here. Either use the code or delete it.
 
 **Do NOT:**
 - Leave warnings unaddressed
 - Suppress warnings with `#[allow(...)]` attributes
 - Complete a task with a build that shows warnings
-- Keep "future use" code that isn't currently needed
 
 **Keep the codebase clean:**
-- If you plan to add features later, document plans in todo lists or research docs
-- Add the code when you actually need it, not before
-- Trust that you can always add code back later when needed
-
-**Why this matters:**
-- Warnings indicate potential bugs, dead code, or API deprecations
-- Warning-free builds maintain code quality and prevent warning fatigue
-- Future changes are easier when the codebase starts clean
+- Delete unused code now; add it back when actually needed
+- If you plan to add features later, note them in NEXT_STEPS.md or a comment
 
 ## Development Workflow
 
 ### Implementing a New System
 
-1. **Research Phase**
-   - Investigate options and approaches
-   - Create research doc in `docs/research/[system-name].md`
-   - Document problem, options, decision, and rationale
+1. **Research Phase** (only for genuine architectural choices)
+   - If there's a real fork in the road (library selection, algorithmic approach), investigate and create `docs/research/[system-name].md`
+   - If the approach is obvious, skip the research doc and go straight to implementation
 
 2. **Implementation Phase**
-   - Determine if engine or game code
-   - Write code following engine/game separation
-   - Add comments explaining non-obvious decisions
-   - Reference research doc in code comments if applicable
+   - Write code, add comments explaining non-obvious decisions
+   - Reference research doc in code comments if one exists
 
 3. **Documentation Phase**
    - Update CLAUDE.md with new architecture details
-   - Update research doc with implementation insights
-   - Document any deviations from planned approach
 
 4. **Validation**
    - **Verify warning-free build** (`cargo build` shows 0 warnings)
    - Test the implementation
-   - Verify engine/game separation is maintained
-   - Ensure documentation is accurate and complete
+   - Ensure CLAUDE.md is accurate and complete
 
 5. **Commit to Git**
    - Stage relevant files (`git add`)

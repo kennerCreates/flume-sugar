@@ -10,15 +10,17 @@
 //   - Edge scrolling moves target when mouse is near screen edges
 
 use glam::{Mat4, Vec2, Vec3};
-use crate::engine::input::InputState;
+use super::input::InputState;
 use winit::keyboard::KeyCode;
 
 pub struct RtsCamera {
-    /// Point on the ground plane (X/Z) the camera orbits around
-    pub target: Vec2,
+    /// Point on the ground plane (X/Z) the camera orbits around.
+    /// Private: always clamped to bounds in update(). Use target() to read.
+    target: Vec2,
 
-    /// Distance from target along the look direction
-    pub distance: f32,
+    /// Distance from target along the look direction.
+    /// Private: always clamped to [min_distance, max_distance] in update(). Use distance() to read.
+    distance: f32,
     pub min_distance: f32,
     pub max_distance: f32,
 
@@ -137,11 +139,15 @@ impl RtsCamera {
         self.projection_matrix(aspect) * self.view_matrix()
     }
 
-    /// Zoom fraction in [0, 1]: 0 = fully zoomed in (min_distance), 1 = fully zoomed out.
+    pub fn target(&self) -> Vec2 { self.target }
+    pub fn distance(&self) -> f32 { self.distance }
+
+    /// Zoom fraction in [0, 1]: 1 = fully zoomed in (min_distance), 0 = fully zoomed out.
+    /// Matches player intuition: zoom 100% = closest view.
     pub fn zoom_fraction(&self) -> f32 {
         let range = self.max_distance - self.min_distance;
         if range > 0.0 {
-            (self.distance - self.min_distance) / range
+            1.0 - (self.distance - self.min_distance) / range
         } else {
             0.0
         }

@@ -8,10 +8,13 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 pub struct InputState {
     // Keyboard
     keys_held: HashSet<KeyCode>,
+    keys_just_pressed: HashSet<KeyCode>,
 
     // Mouse
     pub mouse_position: (f32, f32),
-    mouse_prev_position: (f32, f32),
+    /// Accumulated mouse movement this frame. Reset to (0, 0) in end_frame().
+    /// Computed incrementally in process_event so it reflects the current frame,
+    /// not the previous one.
     pub mouse_delta: (f32, f32),
 
     // Scroll: accumulated vertical scroll this frame, reset in end_frame()
@@ -25,8 +28,8 @@ impl InputState {
     pub fn new() -> Self {
         Self {
             keys_held: HashSet::new(),
+            keys_just_pressed: HashSet::new(),
             mouse_position: (0.0, 0.0),
-            mouse_prev_position: (0.0, 0.0),
             mouse_delta: (0.0, 0.0),
             scroll_delta: 0.0,
             window_size: (0, 0),
@@ -40,13 +43,24 @@ impl InputState {
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     match event.state {
-                        ElementState::Pressed => { self.keys_held.insert(key); }
-                        ElementState::Released => { self.keys_held.remove(&key); }
+                        ElementState::Pressed => {
+                            if !self.keys_held.contains(&key) {
+                                self.keys_just_pressed.insert(key);
+                            }
+                            self.keys_held.insert(key);
+                        }
+                        ElementState::Released => {
+                            self.keys_held.remove(&key);
+                        }
                     }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.mouse_position = (position.x as f32, position.y as f32);
+                let new_pos = (position.x as f32, position.y as f32);
+                // Accumulate delta so multiple CursorMoved events in one frame add up correctly
+                self.mouse_delta.0 += new_pos.0 - self.mouse_position.0;
+                self.mouse_delta.1 += new_pos.1 - self.mouse_position.1;
+                self.mouse_position = new_pos;
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let y = match delta {
@@ -65,15 +79,19 @@ impl InputState {
     /// Call once per frame after update() and render() have consumed input.
     /// Resets per-frame accumulators.
     pub fn end_frame(&mut self) {
+        self.keys_just_pressed.clear();
         self.scroll_delta = 0.0;
-        self.mouse_delta = (
-            self.mouse_position.0 - self.mouse_prev_position.0,
-            self.mouse_position.1 - self.mouse_prev_position.1,
-        );
-        self.mouse_prev_position = self.mouse_position;
+        self.mouse_delta = (0.0, 0.0);
     }
 
     pub fn is_key_held(&self, key: KeyCode) -> bool {
         self.keys_held.contains(&key)
     }
+
+    /// True only during the frame the key was first pressed. Use this for
+    /// one-shot actions (toggle menus, select units, etc.) rather than is_key_held.
+    pub fn is_key_just_pressed(&self, key: KeyCode) -> bool {
+        self.keys_just_pressed.contains(&key)
+    }
+
 }

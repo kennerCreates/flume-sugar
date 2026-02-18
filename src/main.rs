@@ -501,6 +501,11 @@ impl State {
         let dt = (now - self.last_update).as_secs_f32();
         self.last_update = now;
 
+        // One-shot key actions (toggle overlay, future modal actions)
+        if self.input.is_key_just_pressed(KeyCode::F3) {
+            self.debug_overlay.toggle();
+        }
+
         self.camera.update(&self.input, dt);
 
         // Update ECS systems
@@ -655,8 +660,8 @@ impl State {
                 entity_count,
                 draw_calls: 1,
                 resolution: (self.config.width, self.config.height),
-                camera_target: (self.camera.target.x, self.camera.target.y),
-                camera_distance: self.camera.distance,
+                camera_target: (self.camera.target().x, self.camera.target().y),
+                camera_distance: self.camera.distance(),
                 camera_zoom_pct: self.camera.zoom_fraction() * 100.0,
             };
 
@@ -766,17 +771,6 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 event_loop.exit();
-            }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::F3),
-                        ..
-                    },
-                ..
-            } => {
-                state.debug_overlay.toggle();
             }
             WindowEvent::Resized(physical_size) => {
                 state.resize(physical_size);
