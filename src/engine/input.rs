@@ -2,7 +2,7 @@
 // Abstracts winit events into a queryable per-frame snapshot
 
 use std::collections::HashSet;
-use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 pub struct InputState {
@@ -20,6 +20,10 @@ pub struct InputState {
     // Scroll: accumulated vertical scroll this frame, reset in end_frame()
     pub scroll_delta: f32,
 
+    // Mouse buttons
+    pub middle_mouse_held: bool,
+    pub right_mouse_held: bool,
+
     // Window dimensions (used for edge scrolling)
     pub window_size: (u32, u32),
 }
@@ -32,6 +36,8 @@ impl InputState {
             mouse_position: (0.0, 0.0),
             mouse_delta: (0.0, 0.0),
             scroll_delta: 0.0,
+            middle_mouse_held: false,
+            right_mouse_held: false,
             window_size: (0, 0),
         }
     }
@@ -62,6 +68,12 @@ impl InputState {
                 self.mouse_delta.1 += new_pos.1 - self.mouse_position.1;
                 self.mouse_position = new_pos;
             }
+            WindowEvent::MouseInput { state, button: MouseButton::Middle, .. } => {
+                self.middle_mouse_held = *state == ElementState::Pressed;
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => {
+                self.right_mouse_held = *state == ElementState::Pressed;
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let y = match delta {
                     MouseScrollDelta::LineDelta(_, y) => *y,
@@ -82,10 +94,6 @@ impl InputState {
         self.keys_just_pressed.clear();
         self.scroll_delta = 0.0;
         self.mouse_delta = (0.0, 0.0);
-    }
-
-    pub fn is_key_held(&self, key: KeyCode) -> bool {
-        self.keys_held.contains(&key)
     }
 
     /// True only during the frame the key was first pressed. Use this for

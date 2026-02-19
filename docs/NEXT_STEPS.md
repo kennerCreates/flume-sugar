@@ -21,9 +21,10 @@
 
 ### Week 3: Camera & Input
 - `src/engine/input.rs` — `InputState` for keyboard/mouse/scroll tracking from winit events
-- `src/engine/camera.rs` — `RtsCamera` with WASD pan, mouse wheel zoom, edge scrolling, bounds clamping
+- `src/engine/camera.rs` — `RtsCamera` with MMB drag pan, MMB+RMB rotate, mouse wheel zoom, edge scrolling, bounds clamping
 - 20° FOV perspective projection (RTS isometric feel), 55° fixed pitch
-- Camera moves relative to its facing direction (yaw-aware WASD)
+- Pan uses grab-the-world feel with pan_scale formula (accounts for zoom, pitch, FOV, screen height)
+- Yaw rotation via MMB+RMB drag (simultaneous hold); WASD reserved for unit commands
 - Refactored camera uniforms out of inline render() into `RtsCamera` methods
 - Debug overlay updated to show camera target position, distance, and zoom %
 

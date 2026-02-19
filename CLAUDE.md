@@ -31,9 +31,10 @@ cargo run --release
 ```
 
 **Controls:**
-- WASD — pan camera
+- MMB drag — pan camera (grab-the-world)
+- MMB + RMB drag simultaneously — rotate camera yaw (drag left/right)
 - Mouse wheel — zoom in/out
-- Mouse edge scroll — pan camera (move mouse to screen edge)
+- Mouse edge scroll — pan camera when MMB is not held
 - F3 — toggle debug overlay
 - ESC or close window to exit
 - Window resizing is supported
@@ -80,12 +81,13 @@ src/
 
 `RtsCamera` implements a top-down RTS camera:
 - **Target**: A `Vec2` point on the XZ ground plane the camera orbits around
-- **Pitch/Yaw**: Fixed elevation (55°) and horizontal rotation (0 = facing -Z)
+- **Pitch/Yaw**: Fixed elevation (55°) and adjustable horizontal rotation
 - **Distance**: Adjustable zoom between `min_distance` and `max_distance`
 - **FOV**: Low field of view (20°) for isometric-style perspective
-- **Movement**: WASD pans the target on XZ relative to camera facing direction
+- **MMB drag**: Pans target on XZ with grab-the-world feel (pan_scale formula accounts for zoom/pitch/FOV)
+- **MMB + RMB drag**: Rotates yaw; drag left/right maps to radians via `rotate_sensitivity`
 - **Zoom**: Mouse wheel adjusts distance
-- **Edge scrolling**: Mouse near screen edges pans the target
+- **Edge scrolling**: Mouse near screen edges pans the target (disabled during MMB drag)
 - **Bounds**: Target is clamped to configurable XZ map bounds
 
 Key methods:

@@ -3,15 +3,15 @@
 //
 // Camera model:
 //   - A "target" point on the XZ ground plane (Y=0) that the camera looks at
-//   - Fixed pitch (elevation angle) and yaw (horizontal rotation)
+//   - Fixed pitch (elevation angle) and adjustable yaw (horizontal rotation)
 //   - Zoom by adjusting distance along the look vector
-//   - WASD movement moves the target on XZ relative to camera facing direction
+//   - MMB drag pans the target on XZ (grab-the-world feel)
+//   - MMB + RMB drag simultaneously rotates yaw
 //   - Mouse wheel zooms in/out
-//   - Edge scrolling moves target when mouse is near screen edges
+//   - Edge scrolling moves target when mouse is near screen edges (disabled during MMB drag)
 
 use glam::{Mat4, Vec2, Vec3};
 use super::input::InputState;
-use winit::keyboard::KeyCode;
 
 pub struct RtsCamera {
     /// Point on the ground plane (X/Z) the camera orbits around.
@@ -35,8 +35,8 @@ pub struct RtsCamera {
     pub near: f32,
     pub far: f32,
 
-    /// WASD pan speed in world units per second
-    pub move_speed: f32,
+    /// Yaw rotation sensitivity in radians per pixel (MMB+RMB drag)
+    pub rotate_sensitivity: f32,
 
     /// Zoom change (in distance units) per scroll line
     pub zoom_speed: f32,
@@ -64,7 +64,7 @@ impl RtsCamera {
             fov: 20.0_f32.to_radians(),
             near: 0.1,
             far: 200.0,
-            move_speed: 20.0,
+            rotate_sensitivity: 0.005,  // radians per pixel
             zoom_speed: 3.0,
             edge_scroll_speed: 15.0,
             edge_scroll_margin: 20.0,
@@ -73,40 +73,47 @@ impl RtsCamera {
         }
     }
 
-    /// Update camera position based on input. Call once per frame before rendering.
+    /// Update camera based on input. Call once per frame before rendering.
     pub fn update(&mut self, input: &InputState, dt: f32) {
-        // Camera-relative movement directions on the XZ plane.
-        // Forward (W) moves along camera facing projected onto XZ.
-        // yaw=0 means camera faces along -Z, so forward is (0, -1) in (X, Z).
+        // Camera-relative directions on the XZ plane.
+        // yaw=0 faces along -Z, so forward=(0,-1) and right=(1,0) in (X,Z).
         let forward = Vec2::new(-self.yaw.sin(), -self.yaw.cos());
         let right = Vec2::new(self.yaw.cos(), -self.yaw.sin());
 
-        let mut move_dir = Vec2::ZERO;
+        let (dx, dy) = input.mouse_delta;
 
-        if input.is_key_held(KeyCode::KeyW) { move_dir += forward; }
-        if input.is_key_held(KeyCode::KeyS) { move_dir -= forward; }
-        if input.is_key_held(KeyCode::KeyD) { move_dir += right; }
-        if input.is_key_held(KeyCode::KeyA) { move_dir -= right; }
+        if input.right_mouse_held && input.middle_mouse_held {
+            // RMB + MMB: rotate yaw. Drag right = rotate clockwise (positive yaw).
+            self.yaw += dx * self.rotate_sensitivity;
+        } else if input.middle_mouse_held {
+            // MMB only: grab-the-world pan.
+            // pan_scale converts pixel delta to world units, matching the projected
+            // size of the ground plane at the current zoom and pitch.
+            let wh = input.window_size.1 as f32;
+            if wh > 0.0 {
+                let pan_scale = 2.0 * self.distance * self.pitch.cos()
+                    * (self.fov * 0.5).tan() / wh;
+                // Drag right → target moves right; drag down → target moves backward.
+                self.target -= right * dx * pan_scale;
+                self.target += forward * dy * pan_scale;
+            }
+        } else {
+            // Edge scrolling (only active when not dragging with MMB)
+            let (mx, my) = input.mouse_position;
+            let (ww, wh) = (input.window_size.0 as f32, input.window_size.1 as f32);
+            let m = self.edge_scroll_margin;
 
-        if move_dir != Vec2::ZERO {
-            self.target += move_dir.normalize() * self.move_speed * dt;
-        }
+            if ww > 0.0 && wh > 0.0 {
+                let mut edge_dir = Vec2::ZERO;
 
-        // Edge scrolling
-        let (mx, my) = input.mouse_position;
-        let (ww, wh) = (input.window_size.0 as f32, input.window_size.1 as f32);
-        let m = self.edge_scroll_margin;
+                if mx < m       { edge_dir -= right; }
+                if mx > ww - m  { edge_dir += right; }
+                if my < m       { edge_dir += forward; }
+                if my > wh - m  { edge_dir -= forward; }
 
-        if ww > 0.0 && wh > 0.0 {
-            let mut edge_dir = Vec2::ZERO;
-
-            if mx < m       { edge_dir -= right; }
-            if mx > ww - m  { edge_dir += right; }
-            if my < m       { edge_dir += forward; }
-            if my > wh - m  { edge_dir -= forward; }
-
-            if edge_dir != Vec2::ZERO {
-                self.target += edge_dir.normalize() * self.edge_scroll_speed * dt;
+                if edge_dir != Vec2::ZERO {
+                    self.target += edge_dir.normalize() * self.edge_scroll_speed * dt;
+                }
             }
         }
 
