@@ -37,3 +37,10 @@ pub struct Color {
 pub struct Velocity {
     pub linear: Vec3,
 }
+
+/// Assigns an entity to a movement group.
+/// The group_id indexes into the `groups` Vec stored on State.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct GroupMembership {
+    pub group_id: u32,
+}

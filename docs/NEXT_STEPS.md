@@ -1,6 +1,6 @@
 # Next Steps - Immediate Action Plan
 
-**Last Updated:** 2026-02-18
+**Last Updated:** 2026-02-19
 **Status:** Phase 2 - Procedural Modeling Pipeline Implemented
 
 ## Completed
@@ -42,8 +42,11 @@
 
 | Priority | System | Notes |
 |----------|--------|-------|
-| HIGH | Procedural modeling (skin + subdivision) | Core visual identity — biggest technical risk |
-| HIGH | Pathfinding (A* or flowfield) | Essential for RTS unit movement |
+| HIGH | **Pathfinding Sprint 1** — NavigationGrid + Flowfield | Groups navigate to destination; see pathfinding.md |
+| HIGH | **Pathfinding Sprint 2** — ORCA local avoidance | Units don't overlap; crossing test |
+| HIGH | **Pathfinding Sprint 3** — Density feedback flowfields | Corridor spreading, novel differentiator |
+| HIGH | **Crossing test scene** — 8 groups × 250 units | Validate full stack with group-vs-group crossing |
+| HIGH | **Pathfinding Sprint 4** — Formation + arrival | Group cohesion, slot compression at chokepoints |
 | MEDIUM | Terrain/map rendering | Ground plane, 128x128 tile grid |
 | MEDIUM | Selection & commands | Click-to-select, right-click-to-move |
 | MEDIUM | Combat & resource systems | Core RTS gameplay loop |
@@ -62,4 +65,4 @@
 | Done | [ui-system.md](./research/ui-system.md) | UI approach — egui chosen |
 | Done | camera-system.md | RTS camera math, ray casting |
 | Done | [procedural-modeling.md](./research/procedural-modeling.md) | Skin modifier, Catmull-Clark subdivision |
-| TODO | pathfinding.md | A* vs flowfields, steering |
+| Done | [pathfinding.md](./research/pathfinding.md) | Flowfield + ORCA + density feedback — full architecture |

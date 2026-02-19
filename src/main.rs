@@ -12,11 +12,17 @@ use winit::{
 };
 use glam::{Mat4, Vec3};
 use bevy_ecs::prelude::*;
-use engine::{Transform, Color as EntityColor, Velocity};
+use engine::{Transform, Color as EntityColor, Velocity, GroupMembership};
+use engine::{NavigationGrid, FlowField, compute_flowfield, GRID_WIDTH, GRID_HEIGHT};
 use engine::camera::RtsCamera;
 use engine::debug_overlay::{DebugOverlay, DebugStats};
 use engine::input::InputState;
 use engine::mesh::GpuVertex;
+
+/// Movement speed for all units (world units per second).
+const UNIT_SPEED: f32 = 5.0;
+/// Units within this world-space distance of their goal are considered arrived.
+const ARRIVAL_RADIUS: f32 = 1.5;
 
 // ============================================================================
 // INSTANCE DATA (per-entity, passed alongside the shared procedural mesh)
@@ -137,6 +143,43 @@ fn build_procedural_sphere() -> engine::mesh::RenderMesh {
 }
 
 // ============================================================================
+// UNIT GROUPS  (test scene — 8 groups crossing the map)
+// ============================================================================
+
+struct UnitGroup {
+    id: u32,
+    color: [f32; 3],
+    /// World-space spawn centre.
+    start_world: glam::Vec3,
+    /// World-space destination.
+    goal_world: glam::Vec3,
+    /// Pre-computed flowfield for this group's goal.
+    flow_field: FlowField,
+}
+
+/// Build the 8 crossing groups and compute their flowfields.
+fn create_crossing_groups(nav_grid: &NavigationGrid) -> Vec<UnitGroup> {
+    // (start_xz, goal_xz, rgb)
+    let defs: &[([f32; 2], [f32; 2], [f32; 3])] = &[
+        ([-35.0, -35.0], [ 35.0,  35.0], [1.00, 0.15, 0.15]), // NW → SE  Red
+        ([  0.0, -35.0], [  0.0,  35.0], [1.00, 0.55, 0.10]), // N  → S   Orange
+        ([ 35.0, -35.0], [-35.0,  35.0], [0.90, 0.90, 0.10]), // NE → SW  Yellow
+        ([ 35.0,   0.0], [-35.0,   0.0], [0.10, 0.90, 0.10]), // E  → W   Green
+        ([ 35.0,  35.0], [-35.0, -35.0], [0.10, 0.85, 0.90]), // SE → NW  Cyan
+        ([  0.0,  35.0], [  0.0, -35.0], [0.10, 0.15, 1.00]), // S  → N   Blue
+        ([-35.0,  35.0], [ 35.0, -35.0], [0.65, 0.10, 0.90]), // SW → NE  Purple
+        ([-35.0,   0.0], [ 35.0,   0.0], [0.90, 0.15, 0.60]), // W  → E   Magenta
+    ];
+
+    defs.iter().enumerate().map(|(i, (start_xz, goal_xz, color))| {
+        let start_world = glam::Vec3::new(start_xz[0], 0.5, start_xz[1]);
+        let goal_world  = glam::Vec3::new(goal_xz[0],  0.0, goal_xz[1]);
+        let flow_field  = compute_flowfield(nav_grid, goal_world);
+        UnitGroup { id: i as u32, color: *color, start_world, goal_world, flow_field }
+    }).collect()
+}
+
+// ============================================================================
 // APPLICATION STATE
 // ============================================================================
 
@@ -167,6 +210,10 @@ struct State {
     // ECS World
     world: World,
     last_update: std::time::Instant,
+
+    // Pathfinding
+    nav_grid: NavigationGrid,
+    groups: Vec<UnitGroup>,
 
     // Camera & Input
     camera: RtsCamera,
@@ -396,7 +443,7 @@ impl State {
         let num_indices = render_mesh.index_count() as u32;
 
         // Instance buffer for per-entity position+color (shared across all entities)
-        let max_instances = 1000;
+        let max_instances = 2000;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Instance Buffer"),
             size: (max_instances * std::mem::size_of::<InstanceData>()) as u64,
@@ -431,9 +478,13 @@ impl State {
         let (depth_texture, depth_view) = Self::create_depth_texture(&device, &config);
         let debug_overlay = DebugOverlay::new(&window, &device, config.format);
 
-        // ECS world — 1000 moving entities
+        // Build navigation grid and compute flowfields for the crossing test.
+        let nav_grid = NavigationGrid::new_open(GRID_WIDTH, GRID_HEIGHT);
+        let groups = create_crossing_groups(&nav_grid);
+
+        // ECS world — 2000 units in 8 crossing groups.
         let mut world = World::new();
-        spawn_test_entities(&mut world, 1000);
+        spawn_crossing_scene(&mut world, &groups);
 
         Self {
             surface,
@@ -458,6 +509,8 @@ impl State {
             depth_view,
             world,
             last_update: std::time::Instant::now(),
+            nav_grid,
+            groups,
             camera: RtsCamera::new(),
             input: {
                 let mut input = InputState::new();
@@ -495,35 +548,50 @@ impl State {
 
         self.camera.update(&self.input, dt);
 
-        // Movement system — bounds match camera (±50 on X/Z)
-        let bounds = Vec3::new(100.0, 10.0, 100.0);
+        // ── Flowfield movement ──────────────────────────────────────────────
+        // Pass 1 (read-only): sample each unit's flowfield and compute the
+        // velocity it should have this frame.
+        let nav_grid = &self.nav_grid;
+        let groups   = &self.groups;
+        let move_commands: Vec<(bevy_ecs::entity::Entity, Vec3)> = {
+            let mut query = self.world.query::<(bevy_ecs::entity::Entity, &Transform, &GroupMembership)>();
+            query.iter(&self.world).filter_map(|(entity, transform, membership)| {
+                let group = groups.get(membership.group_id as usize)?;
+
+                // Arrival check: stop within ARRIVAL_RADIUS of the goal.
+                let to_goal = group.goal_world - transform.position;
+                let dist_xz = (to_goal.x * to_goal.x + to_goal.z * to_goal.z).sqrt();
+                if dist_xz < ARRIVAL_RADIUS {
+                    return Some((entity, Vec3::ZERO));
+                }
+
+                // Sample the flowfield at the unit's current cell.
+                let cell = nav_grid.world_to_cell(transform.position)?;
+                let dir  = group.flow_field.sample_cell(cell);
+
+                if dir == glam::Vec2::ZERO {
+                    // Cell is at goal or unreachable — steer directly.
+                    let d = glam::Vec2::new(to_goal.x, to_goal.z).normalize_or_zero();
+                    return Some((entity, Vec3::new(d.x * UNIT_SPEED, 0.0, d.y * UNIT_SPEED)));
+                }
+
+                Some((entity, Vec3::new(dir.x * UNIT_SPEED, 0.0, dir.y * UNIT_SPEED)))
+            }).collect()
+        };
+
+        // Pass 2 (write): apply the computed velocities.
+        for (entity, vel) in move_commands {
+            if let Some(mut velocity) = self.world.get_mut::<Velocity>(entity) {
+                velocity.linear = vel;
+            }
+        }
+
+        // ── Integrate positions ─────────────────────────────────────────────
         {
             let mut query = self.world.query::<(&mut Transform, &Velocity)>();
             for (mut transform, velocity) in query.iter_mut(&mut self.world) {
                 transform.position += velocity.linear * dt;
-            }
-        }
-
-        // Bounds/redirect system
-        {
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-            let half_bounds = bounds / 2.0;
-            let mut query = self.world.query::<(&mut Transform, &mut Velocity)>();
-            for (transform, mut velocity) in query.iter_mut(&mut self.world) {
-                let out_of_bounds =
-                    transform.position.x > half_bounds.x || transform.position.x < -half_bounds.x
-                    || transform.position.z > half_bounds.z || transform.position.z < -half_bounds.z;
-                if out_of_bounds {
-                    let target = Vec3::new(
-                        rng.gen_range(-half_bounds.x..half_bounds.x),
-                        0.5,  // stay on ground plane
-                        rng.gen_range(-half_bounds.z..half_bounds.z),
-                    );
-                    let direction = (target - transform.position).normalize();
-                    let current_speed = velocity.linear.length();
-                    velocity.linear = direction * current_speed;
-                }
+                transform.position.y = 0.5; // keep spheres on the ground plane
             }
         }
     }
@@ -655,34 +723,58 @@ impl State {
 // ENTITY SPAWNING
 // ============================================================================
 
-/// Spawn `count` entities with random positions, velocities, and colors.
-fn spawn_test_entities(world: &mut World, count: usize) {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let bounds = Vec3::new(100.0, 10.0, 100.0);
+/// Spawn 250 units per group in a battle-line formation oriented perpendicular
+/// to each group's travel direction so it reads clearly from any camera angle.
+///
+/// Layout: 25 wide (⟂ to travel) × 10 deep (∥ to travel) = 250 exactly.
+fn spawn_crossing_scene(world: &mut World, groups: &[UnitGroup]) {
+    const FORM_WIDE: u32 = 25; // units perpendicular to travel direction
+    const FORM_DEEP: u32 = 10; // units along travel direction
+    const SPACING: f32 = 0.85; // world units between unit centres
 
-    for _ in 0..count {
-        let position = Vec3::new(
-            rng.gen_range(-bounds.x / 2.0..bounds.x / 2.0),
-            0.5,  // sphere radius = 0.5, rests on ground at y=0
-            rng.gen_range(-bounds.z / 2.0..bounds.z / 2.0),
-        );
-        let velocity = Velocity {
-            linear: Vec3::new(
-                rng.gen_range(-2.0..2.0),
-                0.0,  // no vertical movement — spheres roll on the ground plane
-                rng.gen_range(-2.0..2.0),
-            ),
+    let half_w = FORM_WIDE as f32 * SPACING * 0.5;
+    let half_d = FORM_DEEP as f32 * SPACING * 0.5;
+
+    let mut total = 0u32;
+    for group in groups {
+        // Unit travel direction in the XZ plane (normalised).
+        let to_goal = group.goal_world - group.start_world;
+        let dist = (to_goal.x * to_goal.x + to_goal.z * to_goal.z).sqrt();
+        let travel = if dist > 0.001 {
+            glam::Vec2::new(to_goal.x / dist, to_goal.z / dist)
+        } else {
+            glam::Vec2::X
         };
-        let color = EntityColor {
-            r: rng.gen_range(0.2..1.0),
-            g: rng.gen_range(0.2..1.0),
-            b: rng.gen_range(0.2..1.0),
-        };
-        world.spawn((Transform::from_position(position), velocity, color));
+        // Perpendicular to travel (rotate 90° CCW in XZ).
+        let perp = glam::Vec2::new(-travel.y, travel.x);
+
+        for d in 0..FORM_DEEP {
+            for w in 0..FORM_WIDE {
+                let offset_perp   = w as f32 * SPACING - half_w + SPACING * 0.5;
+                let offset_travel = d as f32 * SPACING - half_d + SPACING * 0.5;
+
+                let world_x = group.start_world.x
+                    + perp.x * offset_perp
+                    + travel.x * offset_travel;
+                let world_z = group.start_world.z
+                    + perp.y * offset_perp
+                    + travel.y * offset_travel;
+
+                world.spawn((
+                    Transform::from_position(Vec3::new(
+                        world_x.clamp(-49.0, 49.0),
+                        0.5,
+                        world_z.clamp(-49.0, 49.0),
+                    )),
+                    Velocity { linear: Vec3::ZERO },
+                    EntityColor { r: group.color[0], g: group.color[1], b: group.color[2] },
+                    GroupMembership { group_id: group.id },
+                ));
+                total += 1;
+            }
+        }
     }
-
-    println!("Spawned {} entities", count);
+    println!("Crossing scene: {} units across {} groups", total, groups.len());
 }
 
 // ============================================================================
@@ -769,7 +861,7 @@ impl ApplicationHandler for App {
                     };
                     let entity_count = state.world.query::<&Transform>().iter(&state.world).count();
                     window.set_title(&format!(
-                        "Flume Sugar - {} FPS | {:.2} ms | {} entities | 1 draw call",
+                        "Flume Sugar - {} FPS | {:.2} ms | {} entities",
                         state.current_fps,
                         avg_frame_time * 1000.0,
                         entity_count
