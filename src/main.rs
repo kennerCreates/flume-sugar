@@ -54,6 +54,20 @@ const SLOT_PULL_DIST: f32 = 6.0;
 /// Fraction of group units that must reach the goal before the group is disbanded.
 const ARRIVAL_FRACTION: f32 = 0.90;
 
+// ── Sprint 5: Formation Reformation (catch-up / wait) ─────────────────────
+
+/// Forward slot-error (world units along travel dir) above which a unit is "lagging".
+/// Lagging units exceed normal max_speed to sprint back to their slot.
+const REFORM_LAG_THRESHOLD: f32 = 1.5;
+/// Forward slot-error below this marks a unit as "leading" (it is ahead of its slot).
+const REFORM_LEAD_THRESHOLD: f32 = -1.0;
+/// Group max-lag (world units) at which leading units begin slowing to wait.
+/// Ramps linearly to a full stop 2 world units later.
+const REFORM_WAIT_TRIGGER: f32 = 3.0;
+/// Speed multiplier for lagging units during reformation.
+/// 2× normal speed means a unit 4–5 units behind its slot closes the gap in under one second.
+const CATCHUP_SPEED_MULT: f32 = 2.0;
+
 // ============================================================================
 // INSTANCE DATA (per-entity, passed alongside the shared procedural mesh)
 // ============================================================================
@@ -763,27 +777,92 @@ impl State {
             }
         }
 
+        // ── 3b.5. Per-group formation disruption ─────────────────────────────
+        //
+        // Project each unit's slot error onto the group travel direction.
+        // Positive forward_err = unit is behind its slot (lagging).
+        // We track the worst lag per group; leaders use it to decide how much to slow.
+        let formations = &self.formations;
+        let group_max_lag: Vec<f32> = {
+            let mut lag = vec![0.0f32; num_groups];
+            for snap in &snapshots {
+                if snap.arrived { continue; }
+                let gid = snap.group_id as usize;
+                if gid >= num_groups { continue; }
+                if formations[gid].arrived { continue; }
+                let travel_dir = formations[gid].travel_dir;
+                if travel_dir.length_squared() < 0.01 { continue; }
+                let centroid    = group_centroids[gid];
+                let slot_target = centroid + snap.formation_offset;
+                let forward_err = (slot_target - snap.pos).dot(travel_dir);
+                if forward_err > lag[gid] { lag[gid] = forward_err; }
+            }
+            lag
+        };
+
         // ── 3c. Desired velocity = flowfield + slot pull ──────────────────────
         //
         // Replaces the old boids-centroid cohesion with per-unit slot targets.
         // The slot pull is a soft spring (SLOT_PULL fraction of max_speed), weaker
         // than ORCA so units briefly vacate slots during collisions and drift back.
-        let formations = &self.formations;
-        let desired_vels: Vec<glam::Vec2> = snapshots.iter().map(|snap| {
+        //
+        // Reformation modifiers (Sprint 5):
+        //   Lagging units (forward slot-error > REFORM_LAG_THRESHOLD) get
+        //   CATCHUP_SPEED_MULT × max_speed so they sprint back to their slot.
+        //   Leading units (forward slot-error < REFORM_LEAD_THRESHOLD) ramp
+        //   their flowfield contribution to zero once the group's worst lag
+        //   exceeds REFORM_WAIT_TRIGGER, making them wait for stragglers.
+        //   The same effective speed is passed to ORCA so the solver doesn't
+        //   clamp the boost away.
+        let (desired_vels, effective_speeds): (Vec<glam::Vec2>, Vec<f32>) =
+            snapshots.iter().map(|snap| {
             let gid = snap.group_id as usize;
 
             // Arrived units (individually or whole group disbanded) — stop.
-            if snap.arrived { return glam::Vec2::ZERO; }
+            if snap.arrived { return (glam::Vec2::ZERO, snap.max_speed); }
             if formations.get(gid).map(|f| f.arrived).unwrap_or(false) {
-                return glam::Vec2::ZERO;
+                return (glam::Vec2::ZERO, snap.max_speed);
             }
 
             let group = match groups.get(gid) {
                 Some(g) => g,
-                None    => return glam::Vec2::ZERO,
+                None    => return (glam::Vec2::ZERO, snap.max_speed),
             };
 
-            // Flowfield direction.
+            // ── Reformation: classify this unit and derive speed modifiers ────
+            //
+            // forward_err > 0  →  slot is ahead of unit  →  unit is lagging
+            // forward_err < 0  →  slot is behind unit    →  unit is leading
+            let travel_dir = formations.get(gid).map(|f| f.travel_dir).unwrap_or(glam::Vec2::ZERO);
+            let max_lag    = group_max_lag.get(gid).copied().unwrap_or(0.0);
+            let (effective_max_speed, wait_factor) = if travel_dir.length_squared() > 0.01 {
+                let centroid    = group_centroids.get(gid).copied().unwrap_or(snap.pos);
+                let slot_target = centroid + snap.formation_offset;
+                let forward_err = (slot_target - snap.pos).dot(travel_dir);
+
+                // Lagging: sprint at up to CATCHUP_SPEED_MULT × normal speed.
+                let ems = if forward_err > REFORM_LAG_THRESHOLD {
+                    snap.max_speed * CATCHUP_SPEED_MULT
+                } else {
+                    snap.max_speed
+                };
+
+                // Leading while the group is disrupted: scale flowfield contribution
+                // toward zero so the unit waits for stragglers. Ramps from 1.0 at
+                // REFORM_WAIT_TRIGGER to a full stop 2 world units later.
+                let wf = if forward_err < REFORM_LEAD_THRESHOLD && max_lag > REFORM_WAIT_TRIGGER {
+                    let t = ((max_lag - REFORM_WAIT_TRIGGER) / 2.0).clamp(0.0, 1.0);
+                    1.0_f32 - t
+                } else {
+                    1.0_f32
+                };
+
+                (ems, wf)
+            } else {
+                (snap.max_speed, 1.0_f32)
+            };
+
+            // Flowfield direction (scaled by wait_factor for leading units).
             let pos3 = Vec3::new(snap.pos.x, 0.5, snap.pos.y);
             let dir  = nav_grid
                 .world_to_cell(pos3)
@@ -791,9 +870,9 @@ impl State {
                 .unwrap_or(glam::Vec2::ZERO);
             let flowfield_vel = if dir == glam::Vec2::ZERO {
                 let goal = glam::Vec2::new(group.goal_world.x, group.goal_world.z);
-                (goal - snap.pos).normalize_or_zero() * snap.max_speed
+                (goal - snap.pos).normalize_or_zero() * effective_max_speed * wait_factor
             } else {
-                dir * snap.max_speed
+                dir * effective_max_speed * wait_factor
             };
 
             // Slot pull: full 2D spring toward the unit's fixed formation slot.
@@ -805,6 +884,7 @@ impl State {
             //   - Before crossing: near-zero error → near-zero pull → tight formation.
             //   - During crossing: inter-group ORCA competes with pull → fluid deformation.
             //   - After crossing:  no more ORCA → slot pull drives reformation.
+            // Uses effective_max_speed so lagging units also get the boost on the pull.
             let slot_pull_vel = if let Some(_formation) = formations.get(gid) {
                 let centroid    = group_centroids.get(gid).copied().unwrap_or(snap.pos);
                 let slot_target = centroid + snap.formation_offset;
@@ -812,7 +892,7 @@ impl State {
                 let slot_dist   = to_slot.length();
                 if slot_dist > 0.05 {
                     let t = (slot_dist / SLOT_PULL_DIST).min(1.0);
-                    to_slot / slot_dist * snap.max_speed * t * SLOT_PULL
+                    to_slot / slot_dist * effective_max_speed * t * SLOT_PULL
                 } else {
                     glam::Vec2::ZERO
                 }
@@ -820,18 +900,20 @@ impl State {
                 glam::Vec2::ZERO
             };
 
-            (flowfield_vel + slot_pull_vel).clamp_length_max(snap.max_speed)
-        }).collect();
+            let desired_vel = (flowfield_vel + slot_pull_vel).clamp_length_max(effective_max_speed);
+            (desired_vel, effective_max_speed)
+        }).unzip();
 
         // ── 4. ORCA ──────────────────────────────────────────────────────────
         let agent_snaps: Vec<AgentSnapshot> = snapshots.iter()
             .zip(desired_vels.iter())
-            .map(|(snap, &dv)| AgentSnapshot {
+            .zip(effective_speeds.iter())
+            .map(|((snap, &dv), &ems)| AgentSnapshot {
                 pos:         snap.pos,
                 vel:         snap.vel,
                 desired_vel: dv,
                 radius:      snap.radius,
-                max_speed:   snap.max_speed,
+                max_speed:   ems,   // boosted for laggers so ORCA doesn't clamp the sprint
                 group_id:    snap.group_id,
             })
             .collect();
