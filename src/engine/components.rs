@@ -31,3 +31,9 @@ pub struct Color {
     pub g: f32,
     pub b: f32,
 }
+
+/// Velocity of an entity in 3D space (units per second)
+#[derive(Component, Debug, Clone, Copy)]
+pub struct Velocity {
+    pub linear: Vec3,
+}

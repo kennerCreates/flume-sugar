@@ -12,7 +12,7 @@ use winit::{
 };
 use glam::{Mat4, Vec3};
 use bevy_ecs::prelude::*;
-use engine::{Transform, Color as EntityColor};
+use engine::{Transform, Color as EntityColor, Velocity};
 use engine::camera::RtsCamera;
 use engine::debug_overlay::{DebugOverlay, DebugStats};
 use engine::input::InputState;
@@ -385,9 +385,9 @@ impl State {
         let (depth_texture, depth_view) = Self::create_depth_texture(&device, &config);
         let debug_overlay = DebugOverlay::new(&window, &device, config.format);
 
-        // ECS world — static procedural test scene (no Velocity, no movement)
+        // ECS world — 1000 moving entities
         let mut world = World::new();
-        spawn_procedural_test_scene(&mut world);
+        spawn_test_entities(&mut world, 1000);
 
         Self {
             surface,
@@ -444,7 +444,39 @@ impl State {
         }
 
         self.camera.update(&self.input, dt);
-        // No movement system — test scene entities are static (no Velocity component)
+
+        // Movement system
+        let bounds = Vec3::new(20.0, 10.0, 20.0);
+        {
+            let mut query = self.world.query::<(&mut Transform, &Velocity)>();
+            for (mut transform, velocity) in query.iter_mut(&mut self.world) {
+                transform.position += velocity.linear * dt;
+            }
+        }
+
+        // Bounds/redirect system
+        {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            let half_bounds = bounds / 2.0;
+            let mut query = self.world.query::<(&mut Transform, &mut Velocity)>();
+            for (transform, mut velocity) in query.iter_mut(&mut self.world) {
+                let out_of_bounds =
+                    transform.position.x > half_bounds.x || transform.position.x < -half_bounds.x
+                    || transform.position.z > half_bounds.z || transform.position.z < -half_bounds.z
+                    || transform.position.y < 0.0 || transform.position.y > bounds.y;
+                if out_of_bounds {
+                    let target = Vec3::new(
+                        rng.gen_range(-half_bounds.x..half_bounds.x),
+                        rng.gen_range(0.0..bounds.y),
+                        rng.gen_range(-half_bounds.z..half_bounds.z),
+                    );
+                    let direction = (target - transform.position).normalize();
+                    let current_speed = velocity.linear.length();
+                    velocity.linear = direction * current_speed;
+                }
+            }
+        }
     }
 
     fn render(&mut self, window: &winit::window::Window) -> Result<(), wgpu::SurfaceError> {
@@ -565,41 +597,37 @@ impl State {
 }
 
 // ============================================================================
-// PROCEDURAL TEST SCENE
+// ENTITY SPAWNING
 // ============================================================================
 
-/// Spawn 8 static sphere-like entities in a 2×2×2 arrangement.
-/// No Velocity component — static test scene for inspecting the procedural mesh.
-fn spawn_procedural_test_scene(world: &mut World) {
-    let s = 3.0_f32;  // spacing between entities
+/// Spawn `count` entities with random positions, velocities, and colors.
+fn spawn_test_entities(world: &mut World, count: usize) {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let bounds = Vec3::new(20.0, 10.0, 20.0);
 
-    let positions = [
-        Vec3::new(-s * 0.5, 2.0, -s * 0.5),
-        Vec3::new( s * 0.5, 2.0, -s * 0.5),
-        Vec3::new(-s * 0.5, 2.0,  s * 0.5),
-        Vec3::new( s * 0.5, 2.0,  s * 0.5),
-        Vec3::new(-s * 0.5, 2.0 + s, -s * 0.5),
-        Vec3::new( s * 0.5, 2.0 + s, -s * 0.5),
-        Vec3::new(-s * 0.5, 2.0 + s,  s * 0.5),
-        Vec3::new( s * 0.5, 2.0 + s,  s * 0.5),
-    ];
-
-    let colors = [
-        EntityColor { r: 1.0, g: 0.3, b: 0.3 },  // red
-        EntityColor { r: 0.3, g: 1.0, b: 0.3 },  // green
-        EntityColor { r: 0.3, g: 0.3, b: 1.0 },  // blue
-        EntityColor { r: 1.0, g: 1.0, b: 0.3 },  // yellow
-        EntityColor { r: 1.0, g: 0.3, b: 1.0 },  // magenta
-        EntityColor { r: 0.3, g: 1.0, b: 1.0 },  // cyan
-        EntityColor { r: 1.0, g: 0.6, b: 0.2 },  // orange
-        EntityColor { r: 0.8, g: 0.8, b: 0.8 },  // white
-    ];
-
-    for (pos, color) in positions.iter().zip(colors.iter()) {
-        world.spawn((Transform::from_position(*pos), *color));
+    for _ in 0..count {
+        let position = Vec3::new(
+            rng.gen_range(-bounds.x / 2.0..bounds.x / 2.0),
+            rng.gen_range(0.0..bounds.y),
+            rng.gen_range(-bounds.z / 2.0..bounds.z / 2.0),
+        );
+        let velocity = Velocity {
+            linear: Vec3::new(
+                rng.gen_range(-2.0..2.0),
+                rng.gen_range(-1.0..1.0),
+                rng.gen_range(-2.0..2.0),
+            ),
+        };
+        let color = EntityColor {
+            r: rng.gen_range(0.2..1.0),
+            g: rng.gen_range(0.2..1.0),
+            b: rng.gen_range(0.2..1.0),
+        };
+        world.spawn((Transform::from_position(position), velocity, color));
     }
 
-    println!("Spawned {} procedural sphere entities", positions.len());
+    println!("Spawned {} entities", count);
 }
 
 // ============================================================================
