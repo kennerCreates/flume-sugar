@@ -110,6 +110,10 @@ pub struct AgentSnapshot {
     pub desired_vel: Vec2,
     pub radius: f32,
     pub max_speed: f32,
+    /// Group membership.  ORCA constraints are only generated for agents
+    /// in *different* groups — same-group units move in formation and do
+    /// not need to mutually avoid each other.
+    pub group_id: u32,
 }
 
 // ============================================================================
@@ -373,6 +377,9 @@ pub fn compute_orca_velocity(
     for &b_idx in &candidates {
         if b_idx == a_idx { continue; }
         let b = &agents[b_idx];
+        // Same-group units move in formation — skip mutual avoidance so they
+        // don't push each other off their formation slots.
+        if b.group_id == a.group_id { continue; }
 
         // Fine distance filter (grid gives a superset).
         let reach = a.radius + b.radius + a.max_speed * time_horizon;

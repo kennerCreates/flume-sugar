@@ -12,8 +12,7 @@ use winit::{
 };
 use glam::{Mat4, Vec3, UVec2};
 use bevy_ecs::prelude::*;
-use std::collections::HashMap;
-use engine::{Transform, Color as EntityColor, Velocity, GroupMembership, UnitAgent};
+use engine::{Transform, Color as EntityColor, Velocity, GroupMembership, UnitAgent, FormationOffset};
 use engine::{NavigationGrid, FlowField, DensityMap, compute_flowfield, compute_flowfield_with_density, GRID_WIDTH, GRID_HEIGHT};
 use engine::{AgentSnapshot, SpatialGrid, compute_orca_velocity};
 use engine::camera::RtsCamera;
@@ -45,15 +44,12 @@ const DENSITY_UPDATE_INTERVAL: u32 = 8;
 const FORM_WIDE: u32 = 15;
 /// World-unit spacing between formation slots and between spawned unit centres.
 const FORM_SPACING: f32 = 0.85;
-/// Slot-pull strength: max fraction of max_speed applied as spring toward the assigned slot.
-/// Weaker than ORCA so units temporarily leave slots to avoid collisions and drift back.
-const SLOT_PULL: f32 = 0.40;
+/// Slot-pull strength: max fraction of max_speed applied toward the formation slot.
+/// Higher than before because intra-group ORCA is off — the slot pull is the only
+/// force maintaining formation shape and driving post-crossing reformation.
+const SLOT_PULL: f32 = 0.50;
 /// Distance (world units) at which the slot-pull spring reaches full strength.
-const SLOT_PULL_DIST: f32 = 5.0;
-/// Seconds between slot reassignments per group (~0.5 s per pathfinding.md).
-const SLOT_REASSIGN_INTERVAL: f32 = 0.5;
-/// World units ahead of the group centroid to probe when measuring corridor width.
-const CHOKEPOINT_LOOKAHEAD: f32 = 5.0;
+const SLOT_PULL_DIST: f32 = 6.0;
 /// Fraction of group units that must reach the goal before the group is disbanded.
 const ARRIVAL_FRACTION: f32 = 0.90;
 
@@ -190,33 +186,23 @@ struct UnitGroup {
     flow_field: FlowField,
 }
 
-/// Per-group formation state: slot assignments, chokepoint adaptation, arrival.
+/// Per-group formation state: arrival tracking and travel direction.
 ///
-/// Stored separately from `UnitGroup` so the flowfield and formation can be
-/// updated independently and without conflicting borrows.
-///
-/// See pathfinding.md §"Group Movement & Formation (Phase 2 Enhancement)".
+/// Slot positions are no longer stored here — each unit carries a fixed
+/// `FormationOffset` component and its slot target is recomputed each frame
+/// as `group_centroid + formation_offset`.
 struct GroupFormation {
     /// True once enough units have reached the goal — group is disbanded (idle).
     arrived: bool,
-    /// Countdown until next slot reassignment (seconds). 0 triggers immediately.
-    slot_reassign_timer: f32,
     /// Last known travel direction (flowfield dir at group centroid). Vec2::ZERO until first update.
     travel_dir: glam::Vec2,
-    /// Current effective formation width (columns), adapted to corridor width at chokepoints.
-    effective_wide: u32,
-    /// Per-entity assigned slot world position (XZ plane). Rebuilt on each reassignment.
-    slot_positions: HashMap<Entity, glam::Vec2>,
 }
 
 impl GroupFormation {
     fn new() -> Self {
         Self {
             arrived: false,
-            slot_reassign_timer: 0.0, // triggers immediate assignment on first frame
             travel_dir: glam::Vec2::ZERO,
-            effective_wide: FORM_WIDE,
-            slot_positions: HashMap::new(),
         }
     }
 }
@@ -225,8 +211,8 @@ impl GroupFormation {
 fn create_crossing_groups(nav_grid: &NavigationGrid) -> Vec<UnitGroup> {
     // (start_xz, goal_xz, rgb)
     let defs: &[([f32; 2], [f32; 2], [f32; 3])] = &[
-        ([-35.0, 0.0], [35.0, 0.0], [1.00, 0.20, 0.20]), // W → E  Red
-        ([ 35.0, 0.0], [-35.0, 0.0], [0.20, 0.50, 1.00]), // E → W  Blue
+        ([-35.0, -35.0], [ 35.0,  35.0], [1.00, 0.20, 0.20]), // NW → SE  Red
+        ([ 35.0,  35.0], [-35.0, -35.0], [0.20, 0.50, 1.00]), // SE → NW  Blue
     ];
 
     defs.iter().enumerate().map(|(i, (start_xz, goal_xz, color))| {
@@ -655,13 +641,14 @@ impl State {
         let groups   = &self.groups;
 
         struct UnitSnap {
-            entity:   bevy_ecs::entity::Entity,
-            pos:      glam::Vec2,   // XZ
-            vel:      glam::Vec2,   // XZ velocity from last frame
-            radius:   f32,
-            max_speed: f32,
-            group_id: u32,
-            arrived:  bool,
+            entity:           bevy_ecs::entity::Entity,
+            pos:              glam::Vec2,   // XZ
+            vel:              glam::Vec2,   // XZ velocity from last frame
+            radius:           f32,
+            max_speed:        f32,
+            group_id:         u32,
+            arrived:          bool,
+            formation_offset: glam::Vec2,  // fixed spawn-time offset from group centroid
         }
 
         let snapshots: Vec<UnitSnap> = {
@@ -671,8 +658,9 @@ impl State {
                 &Velocity,
                 &UnitAgent,
                 &GroupMembership,
+                &FormationOffset,
             )>();
-            q.iter(&self.world).map(|(entity, tf, vel, agent, gm)| {
+            q.iter(&self.world).map(|(entity, tf, vel, agent, gm, fo)| {
                 let p = tf.position;
                 let v = vel.linear;
                 let arrived = groups.get(gm.group_id as usize).map(|g| {
@@ -682,12 +670,13 @@ impl State {
                 }).unwrap_or(false);
                 UnitSnap {
                     entity,
-                    pos:       glam::Vec2::new(p.x, p.z),
-                    vel:       glam::Vec2::new(v.x, v.z),
-                    radius:    agent.radius,
-                    max_speed: agent.max_speed,
-                    group_id:  gm.group_id,
+                    pos:              glam::Vec2::new(p.x, p.z),
+                    vel:              glam::Vec2::new(v.x, v.z),
+                    radius:           agent.radius,
+                    max_speed:        agent.max_speed,
+                    group_id:         gm.group_id,
                     arrived,
+                    formation_offset: fo.offset,
                 }
             }).collect()
         };
@@ -728,19 +717,19 @@ impl State {
             })
             .collect();
 
-        // ── 3b. Formation update (slot assignment, chokepoint, arrival) ───────
+        // ── 3b. Formation update (arrival + travel direction) ─────────────────
         //
-        // Runs every frame for travel-dir tracking; slot reassignment is gated
-        // by `slot_reassign_timer` (fires every SLOT_REASSIGN_INTERVAL seconds).
+        // Slot targets are no longer reassigned here — each unit carries a
+        // fixed `FormationOffset` and its slot is recomputed every frame as
+        // `group_centroid + formation_offset` (see 3c below).
         for gid in 0..num_groups {
             if self.formations[gid].arrived { continue; }
 
             // ── Arrival check: disband when ARRIVAL_FRACTION of units at goal ─
-            let total    = group_total_count[gid];
+            let total     = group_total_count[gid];
             let n_arrived = group_arrived_count[gid];
             if total > 0 && n_arrived as f32 >= total as f32 * ARRIVAL_FRACTION {
                 self.formations[gid].arrived = true;
-                self.formations[gid].slot_positions.clear();
                 println!(
                     "Group {} arrived ({}/{} units at goal).",
                     gid, n_arrived, total,
@@ -748,14 +737,12 @@ impl State {
                 continue;
             }
 
-            let units = &group_unit_data[gid];
-            if units.is_empty() { continue; }
+            if group_unit_data[gid].is_empty() { continue; }
 
-            let centroid_xz = group_centroids[gid];
+            let centroid_xz   = group_centroids[gid];
             let centroid_world = Vec3::new(centroid_xz.x, 0.5, centroid_xz.y);
 
             // ── Update travel direction from flowfield at group centroid ───────
-            // (done every frame so the direction stays fresh for slot-pull)
             let flow_at_centroid = self.nav_grid
                 .world_to_cell(centroid_world)
                 .map(|cell| self.groups[gid].flow_field.sample_cell(cell))
@@ -764,8 +751,7 @@ impl State {
             if flow_at_centroid.length_squared() > 0.01 {
                 self.formations[gid].travel_dir = flow_at_centroid.normalize();
             } else if self.formations[gid].travel_dir.length_squared() < 0.01 {
-                // Initialise from goal direction before flowfield is first sampled.
-                let goal = self.groups[gid].goal_world;
+                let goal  = self.groups[gid].goal_world;
                 let to_goal = glam::Vec2::new(
                     goal.x - centroid_xz.x,
                     goal.z - centroid_xz.y,
@@ -774,30 +760,6 @@ impl State {
                     self.formations[gid].travel_dir = to_goal.normalize();
                 }
             }
-
-            // ── Slot reassignment (gated by timer) ────────────────────────────
-            self.formations[gid].slot_reassign_timer -= dt;
-            if self.formations[gid].slot_reassign_timer > 0.0 { continue; }
-            self.formations[gid].slot_reassign_timer = SLOT_REASSIGN_INTERVAL;
-
-            let travel_dir = self.formations[gid].travel_dir;
-
-            // Chokepoint detection: compress formation to fit navigable width.
-            let available_width = measure_corridor_width(
-                &self.nav_grid,
-                centroid_xz,
-                travel_dir,
-                CHOKEPOINT_LOOKAHEAD,
-                FORM_WIDE + 2, // scan 1 cell beyond max so full width is detected
-            );
-            self.formations[gid].effective_wide = available_width.max(1).min(FORM_WIDE);
-            let effective_wide = self.formations[gid].effective_wide;
-
-            // Generate slot grid and assign units.
-            let slots = generate_slots(
-                centroid_xz, travel_dir, effective_wide, units.len(), FORM_SPACING,
-            );
-            self.formations[gid].slot_positions = assign_slots(units, &slots, travel_dir);
         }
 
         // ── 3c. Desired velocity = flowfield + slot pull ──────────────────────
@@ -833,28 +795,23 @@ impl State {
                 dir * snap.max_speed
             };
 
-            // Slot pull: spring toward assigned slot — lateral component only.
+            // Slot pull: full 2D spring toward the unit's fixed formation slot.
             //
-            // Removing the forward/backward component ensures the pull never
-            // opposes a unit's progress toward the goal. It only corrects
-            // lateral drift so units spread across the formation width without
-            // slowing down or oscillating around their centroid.
-            let slot_pull_vel = if let Some(formation) = formations.get(gid) {
-                let target = formation
-                    .slot_positions
-                    .get(&snap.entity)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        group_centroids.get(gid).copied().unwrap_or(snap.pos)
-                    });
-                let to_slot = target - snap.pos;
-                // Project out the travel direction so only the lateral component remains.
-                let travel = formation.travel_dir;
-                let lateral = to_slot - travel * to_slot.dot(travel);
-                let slot_dist = lateral.length();
+            // Slot target = group centroid + spawn-time formation offset.
+            // Because intra-group ORCA is disabled, the only thing that displaces
+            // a unit from its slot is the opposing group crossing through. The full
+            // 2D pull (both lateral and forward/backward) means:
+            //   - Before crossing: near-zero error → near-zero pull → tight formation.
+            //   - During crossing: inter-group ORCA competes with pull → fluid deformation.
+            //   - After crossing:  no more ORCA → slot pull drives reformation.
+            let slot_pull_vel = if let Some(_formation) = formations.get(gid) {
+                let centroid    = group_centroids.get(gid).copied().unwrap_or(snap.pos);
+                let slot_target = centroid + snap.formation_offset;
+                let to_slot     = slot_target - snap.pos;
+                let slot_dist   = to_slot.length();
                 if slot_dist > 0.05 {
                     let t = (slot_dist / SLOT_PULL_DIST).min(1.0);
-                    lateral / slot_dist * snap.max_speed * t * SLOT_PULL
+                    to_slot / slot_dist * snap.max_speed * t * SLOT_PULL
                 } else {
                     glam::Vec2::ZERO
                 }
@@ -874,6 +831,7 @@ impl State {
                 desired_vel: dv,
                 radius:      snap.radius,
                 max_speed:   snap.max_speed,
+                group_id:    snap.group_id,
             })
             .collect();
 
@@ -1166,104 +1124,6 @@ impl State {
 }
 
 // ============================================================================
-// FORMATION HELPERS  (Sprint 4)
-// ============================================================================
-
-/// Count walkable cells perpendicular to `travel_dir` at a probe point
-/// `lookahead` world units ahead of `centroid_xz`.
-///
-/// On a fully open map this always returns `max_slots + 1`; it compresses
-/// when terrain walls reduce the navigable band (Sprint 4+ obstacles).
-fn measure_corridor_width(
-    nav_grid: &NavigationGrid,
-    centroid_xz: glam::Vec2,
-    travel_dir: glam::Vec2,
-    lookahead: f32,
-    max_slots: u32,
-) -> u32 {
-    let perp = glam::Vec2::new(-travel_dir.y, travel_dir.x);
-    let probe_x = centroid_xz.x + travel_dir.x * lookahead;
-    let probe_z = centroid_xz.y + travel_dir.y * lookahead;
-    let half = (max_slots / 2) as i32;
-    ((-half)..=half)
-        .filter(|&i| {
-            let p = Vec3::new(
-                probe_x + perp.x * i as f32,
-                0.0,
-                probe_z + perp.y * i as f32,
-            );
-            nav_grid
-                .world_to_cell(p)
-                .map(|cell| nav_grid.is_walkable(cell))
-                .unwrap_or(false)
-        })
-        .count() as u32
-}
-
-/// Generate a rectangular grid of slot world positions centred on `centroid_xz`.
-///
-/// Slots are `effective_wide` columns wide (⟂ travel) and as many rows deep
-/// as needed to fit `unit_count` units.
-fn generate_slots(
-    centroid_xz: glam::Vec2,
-    travel_dir: glam::Vec2,
-    effective_wide: u32,
-    unit_count: usize,
-    spacing: f32,
-) -> Vec<glam::Vec2> {
-    if unit_count == 0 || effective_wide == 0 {
-        return Vec::new();
-    }
-    let perp = glam::Vec2::new(-travel_dir.y, travel_dir.x);
-    let effective_deep = (unit_count as u32).div_ceil(effective_wide).max(1);
-    let half_w = (effective_wide as f32 - 1.0) * 0.5;
-    let half_d = (effective_deep as f32 - 1.0) * 0.5;
-    let mut slots = Vec::with_capacity((effective_wide * effective_deep) as usize);
-    for d in 0..effective_deep {
-        for w in 0..effective_wide {
-            slots.push(
-                centroid_xz
-                    + perp    * ((w as f32 - half_w) * spacing)
-                    + travel_dir * ((d as f32 - half_d) * spacing),
-            );
-        }
-    }
-    slots
-}
-
-/// Assign units to slots using sorted projection matching (O(n log n)).
-///
-/// Both units and slots are sorted by their projection onto `travel_dir`,
-/// then matched index-for-index. Units at the back go to back slots and units
-/// at the front go to front slots, minimising path crossing without the O(n³)
-/// cost of the Hungarian algorithm.
-fn assign_slots(
-    units: &[(Entity, glam::Vec2)],
-    slots: &[glam::Vec2],
-    travel_dir: glam::Vec2,
-) -> HashMap<Entity, glam::Vec2> {
-    let mut sorted_units: Vec<_> = units
-        .iter()
-        .map(|&(e, p)| (e, p.dot(travel_dir)))
-        .collect();
-    sorted_units.sort_by(|a, b| a.1.total_cmp(&b.1));
-
-    let mut sorted_slots: Vec<_> = slots
-        .iter()
-        .map(|&s| (s, s.dot(travel_dir)))
-        .collect();
-    sorted_slots.sort_by(|a, b| a.1.total_cmp(&b.1));
-
-    let mut assignments = HashMap::with_capacity(units.len());
-    for (i, &(entity, _)) in sorted_units.iter().enumerate() {
-        if let Some(&(slot_pos, _)) = sorted_slots.get(i) {
-            assignments.insert(entity, slot_pos);
-        }
-    }
-    assignments
-}
-
-// ============================================================================
 // ENTITY SPAWNING
 // ============================================================================
 
@@ -1271,12 +1131,16 @@ fn assign_slots(
 /// to each group's travel direction so it reads clearly from any camera angle.
 ///
 /// Layout: 15 wide (⟂ to travel) × 5 deep (∥ to travel) = 75 exactly.
+///
+/// Each unit receives a `FormationOffset` equal to its spawn position minus the
+/// group centroid (`start_world.xz`). The formation system uses this fixed
+/// offset every frame so the group keeps its original grid shape throughout.
 fn spawn_crossing_scene(world: &mut World, groups: &[UnitGroup]) {
     // FORM_WIDE and FORM_SPACING are module-level constants shared with the formation system.
-    const FORM_DEEP: u32 = 5; // rows along travel direction (spawn-only, not dynamic)
+    const FORM_DEEP: u32 = 5; // rows along travel direction
 
-    let half_w = FORM_WIDE as f32 * FORM_SPACING * 0.5;
-    let half_d = FORM_DEEP as f32 * FORM_SPACING * 0.5;
+    let half_w = (FORM_WIDE  as f32 - 1.0) * FORM_SPACING * 0.5;
+    let half_d = (FORM_DEEP  as f32 - 1.0) * FORM_SPACING * 0.5;
 
     let mut total = 0u32;
     for group in groups {
@@ -1291,28 +1155,38 @@ fn spawn_crossing_scene(world: &mut World, groups: &[UnitGroup]) {
         // Perpendicular to travel (rotate 90° CCW in XZ).
         let perp = glam::Vec2::new(-travel.y, travel.x);
 
+        // The formation centroid coincides with start_world.
+        let centroid_x = group.start_world.x;
+        let centroid_z = group.start_world.z;
+
         for d in 0..FORM_DEEP {
             for w in 0..FORM_WIDE {
-                let offset_perp   = w as f32 * FORM_SPACING - half_w + FORM_SPACING * 0.5;
-                let offset_travel = d as f32 * FORM_SPACING - half_d + FORM_SPACING * 0.5;
+                let offset_perp   = w as f32 * FORM_SPACING - half_w;
+                let offset_travel = d as f32 * FORM_SPACING - half_d;
 
-                let world_x = group.start_world.x
-                    + perp.x * offset_perp
+                let world_x = centroid_x
+                    + perp.x   * offset_perp
                     + travel.x * offset_travel;
-                let world_z = group.start_world.z
-                    + perp.y * offset_perp
+                let world_z = centroid_z
+                    + perp.y   * offset_perp
                     + travel.y * offset_travel;
 
+                let spawn_x = world_x.clamp(-49.0, 49.0);
+                let spawn_z = world_z.clamp(-49.0, 49.0);
+
+                // Fixed offset from group centroid — preserved for the whole journey.
+                let formation_offset = glam::Vec2::new(
+                    spawn_x - centroid_x,
+                    spawn_z - centroid_z,
+                );
+
                 world.spawn((
-                    Transform::from_position(Vec3::new(
-                        world_x.clamp(-49.0, 49.0),
-                        0.5,
-                        world_z.clamp(-49.0, 49.0),
-                    )),
+                    Transform::from_position(Vec3::new(spawn_x, 0.5, spawn_z)),
                     Velocity { linear: Vec3::ZERO },
                     EntityColor { r: group.color[0], g: group.color[1], b: group.color[2] },
                     GroupMembership { group_id: group.id },
                     UnitAgent { radius: UNIT_RADIUS, max_speed: UNIT_SPEED },
+                    FormationOffset { offset: formation_offset },
                 ));
                 total += 1;
             }

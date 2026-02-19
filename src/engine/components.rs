@@ -55,3 +55,13 @@ pub struct UnitAgent {
     pub radius:    f32,
     pub max_speed: f32,
 }
+
+/// Fixed XZ offset from the group centroid assigned at spawn time.
+///
+/// The formation system uses this to compute each unit's slot target every
+/// frame (`centroid + offset`) instead of dynamically reassigning slots.
+/// Preserves the original spawn grid shape throughout the journey.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct FormationOffset {
+    pub offset: glam::Vec2,
+}
