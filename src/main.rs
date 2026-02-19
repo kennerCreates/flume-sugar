@@ -10,14 +10,14 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, UVec2};
 use bevy_ecs::prelude::*;
 use std::collections::HashMap;
 use engine::{Transform, Color as EntityColor, Velocity, GroupMembership, UnitAgent};
 use engine::{NavigationGrid, FlowField, DensityMap, compute_flowfield, compute_flowfield_with_density, GRID_WIDTH, GRID_HEIGHT};
 use engine::{AgentSnapshot, SpatialGrid, compute_orca_velocity};
 use engine::camera::RtsCamera;
-use engine::debug_overlay::{DebugOverlay, DebugStats, UnitDebugDraw};
+use engine::debug_overlay::{DebugOverlay, DebugStats, UnitDebugDraw, FlowfieldArrowDraw, DensityCell};
 use engine::input::InputState;
 use engine::mesh::GpuVertex;
 use egui;
@@ -291,6 +291,12 @@ struct State {
     debug_overlay: DebugOverlay,
     /// F4 toggle: draw avoidance-radius circles and velocity arrows per unit.
     debug_units_visible: bool,
+    /// F5 toggle: draw flowfield arrows and density heatmap.
+    debug_flowfield_visible: bool,
+    /// Milliseconds spent on the last flowfield recomputation pass.
+    pathfinding_last_ms: f32,
+    /// Running total of flowfield recomputes since startup.
+    flowfield_recompute_count: u32,
 }
 
 impl State {
@@ -599,6 +605,9 @@ impl State {
             current_fps: 0,
             debug_overlay,
             debug_units_visible: false,
+            debug_flowfield_visible: false,
+            pathfinding_last_ms: 0.0,
+            flowfield_recompute_count: 0,
         }
     }
 
@@ -624,6 +633,9 @@ impl State {
         }
         if self.input.is_key_just_pressed(KeyCode::F4) {
             self.debug_units_visible = !self.debug_units_visible;
+        }
+        if self.input.is_key_just_pressed(KeyCode::F5) {
+            self.debug_flowfield_visible = !self.debug_flowfield_visible;
         }
 
         self.camera.update(&self.input, dt);
@@ -895,6 +907,8 @@ impl State {
         // See pathfinding.md §"Layer 2: Group Flowfield / The Novel Part".
         self.frame_count += 1;
         if self.frame_count % DENSITY_UPDATE_INTERVAL == 0 {
+            let t_pf = std::time::Instant::now();
+
             self.density_map.clear();
             {
                 let mut q = self.world.query::<&Transform>();
@@ -910,6 +924,9 @@ impl State {
                     DENSITY_WEIGHT,
                 );
             }
+
+            self.pathfinding_last_ms = t_pf.elapsed().as_secs_f32() * 1000.0;
+            self.flowfield_recompute_count += 1;
         }
     }
 
@@ -989,9 +1006,9 @@ impl State {
             render_pass.draw_indexed(0..self.num_indices, 0, 0..instance_count as u32);
         }
 
-        // Debug overlay (egui) — F3 = stats panel, F4 = unit debug circles.
-        // Run one egui frame covering both so we tessellate only once.
-        if self.debug_overlay.visible || self.debug_units_visible {
+        // Debug overlay (egui) — F3 = stats, F4 = unit circles, F5 = flowfield/density.
+        // Run one egui frame covering all active layers so we tessellate only once.
+        if self.debug_overlay.visible || self.debug_units_visible || self.debug_flowfield_visible {
             let ppp = window.scale_factor() as f32;
             let sw  = self.config.width  as f32;
             let sh  = self.config.height as f32;
@@ -1017,6 +1034,8 @@ impl State {
                     camera_target: (self.camera.target().x, self.camera.target().y),
                     camera_distance: self.camera.distance(),
                     camera_zoom_pct: self.camera.zoom_fraction() * 100.0,
+                    pathfinding_ms: self.pathfinding_last_ms,
+                    flowfield_recomputes: self.flowfield_recompute_count,
                 })
             } else { None };
 
@@ -1049,6 +1068,70 @@ impl State {
                 Some(draws)
             } else { None };
 
+            // ── F5 flowfield arrows + density heatmap ────────────────────────
+            //
+            // Flowfield: sample every 3rd cell of group 0's flowfield.
+            // Density:   draw all cells that have at least one unit.
+            let (flowfield_arrows, density_cells): (Option<Vec<FlowfieldArrowDraw>>, Option<Vec<DensityCell>>) =
+                if self.debug_flowfield_visible {
+                    // Arrow length in world units — 40% of one cell so tips stay inside the cell.
+                    const ARROW_LEN: f32 = 0.40;
+                    const STEP: u32 = 3;
+                    const MAX_DENSITY: f32 = 5.0;
+
+                    let vp = self.camera.view_projection(sw / sh);
+
+                    let mut arrows: Vec<FlowfieldArrowDraw> = Vec::new();
+                    let flow = &self.groups[0].flow_field;
+                    for cz in (0..GRID_HEIGHT).step_by(STEP as usize) {
+                        for cx in (0..GRID_WIDTH).step_by(STEP as usize) {
+                            let cell = UVec2::new(cx, cz);
+                            let dir = flow.sample_cell(cell);
+                            if dir == glam::Vec2::ZERO { continue; }
+
+                            let center = self.nav_grid.cell_center(cell);
+                            let tip = Vec3::new(
+                                center.x + dir.x * ARROW_LEN,
+                                center.y,
+                                center.z + dir.y * ARROW_LEN,
+                            );
+                            if let (Some(from), Some(to)) = (
+                                world_to_screen(center, vp, sw, sh, ppp),
+                                world_to_screen(tip, vp, sw, sh, ppp),
+                            ) {
+                                arrows.push(FlowfieldArrowDraw { from, to });
+                            }
+                        }
+                    }
+
+                    let mut cells: Vec<DensityCell> = Vec::new();
+                    for cz in 0..GRID_HEIGHT {
+                        for cx in 0..GRID_WIDTH {
+                            let cell = UVec2::new(cx, cz);
+                            let count = self.density_map.get(cell);
+                            if count < 0.5 { continue; }
+
+                            let center_w = self.nav_grid.cell_center(cell);
+                            let edge_w   = Vec3::new(center_w.x + 0.5, center_w.y, center_w.z);
+                            if let Some(center_s) = world_to_screen(center_w, vp, sw, sh, ppp) {
+                                let size_px = world_to_screen(edge_w, vp, sw, sh, ppp)
+                                    .map(|ep| {
+                                        let dx = ep.x - center_s.x;
+                                        let dy = ep.y - center_s.y;
+                                        (dx * dx + dy * dy).sqrt() * 2.0
+                                    })
+                                    .unwrap_or(4.0);
+                                let intensity = (count / MAX_DENSITY).min(1.0);
+                                cells.push(DensityCell { center: center_s, size_px, intensity });
+                            }
+                        }
+                    }
+
+                    (Some(arrows), Some(cells))
+                } else {
+                    (None, None)
+                };
+
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [self.config.width, self.config.height],
                 pixels_per_point: ppp,
@@ -1063,6 +1146,8 @@ impl State {
                 &screen_descriptor,
                 stats.as_ref(),
                 unit_draws.as_deref(),
+                flowfield_arrows.as_deref(),
+                density_cells.as_deref(),
             );
         }
 

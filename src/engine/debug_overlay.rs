@@ -11,6 +11,10 @@ pub struct DebugStats {
     pub camera_target: (f32, f32),
     pub camera_distance: f32,
     pub camera_zoom_pct: f32,
+    /// Time spent on the last flowfield recomputation pass (ms). 0 if not yet run.
+    pub pathfinding_ms: f32,
+    /// Total number of flowfield recomputes since startup.
+    pub flowfield_recomputes: u32,
 }
 
 /// One unit's debug draw data, already projected to egui screen points.
@@ -21,6 +25,30 @@ pub struct UnitDebugDraw {
     pub vel_tip: egui::Pos2,
     /// Avoidance-radius circle size in screen points.
     pub radius_px: f32,
+}
+
+/// One flowfield cell's direction arrow, already projected to egui screen points.
+///
+/// Built from every Nth nav cell's flowfield direction; rendered as a short
+/// cyan line with a dot at the tip. Toggled with F5.
+pub struct FlowfieldArrowDraw {
+    /// Arrow tail — cell centre projected to screen.
+    pub from: egui::Pos2,
+    /// Arrow tip — cell centre + direction * arrow_len, projected to screen.
+    pub to: egui::Pos2,
+}
+
+/// One density-heatmap cell, already projected to egui screen points.
+///
+/// Drawn as a semi-transparent orange square whose opacity scales with
+/// unit density. Toggled with F5 alongside the flowfield arrows.
+pub struct DensityCell {
+    /// Cell centre in egui screen points.
+    pub center: egui::Pos2,
+    /// Projected side length of the cell in screen points.
+    pub size_px: f32,
+    /// Density intensity in [0, 1]. 1.0 = fully saturated colour.
+    pub intensity: f32,
 }
 
 pub struct DebugOverlay {
@@ -87,10 +115,14 @@ impl DebugOverlay {
         self.egui_state.on_window_event(window, event)
     }
 
-    /// Render one egui frame covering both optional layers:
+    /// Render one egui frame covering all optional debug layers:
     ///
-    /// - `stats`      — F3 stats panel (`None` = hidden).
-    /// - `unit_draws` — F4 per-unit radius circles + velocity arrows (`None` = hidden).
+    /// - `density_cells`    — F5 density heatmap squares (`None` = hidden).
+    /// - `flowfield_arrows` — F5 per-cell flowfield direction arrows (`None` = hidden).
+    /// - `unit_draws`       — F4 per-unit radius circles + velocity arrows (`None` = hidden).
+    /// - `stats`            — F3 stats panel (`None` = hidden).
+    ///
+    /// All layers are tessellated in a single egui pass for efficiency.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -101,10 +133,56 @@ impl DebugOverlay {
         screen_descriptor: &egui_wgpu::ScreenDescriptor,
         stats: Option<&DebugStats>,
         unit_draws: Option<&[UnitDebugDraw]>,
+        flowfield_arrows: Option<&[FlowfieldArrowDraw]>,
+        density_cells: Option<&[DensityCell]>,
     ) {
         let raw_input = self.egui_state.take_egui_input(window);
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            // ── F5: density heatmap (drawn first — behind everything else) ────
+            if let Some(cells) = density_cells {
+                if !cells.is_empty() {
+                    let painter = ctx.layer_painter(egui::LayerId::new(
+                        egui::Order::Background,
+                        egui::Id::new("density_heat"),
+                    ));
+                    for cell in cells {
+                        let alpha = (cell.intensity * 140.0) as u8;
+                        painter.rect_filled(
+                            egui::Rect::from_center_size(
+                                cell.center,
+                                egui::vec2(cell.size_px, cell.size_px),
+                            ),
+                            0.0,
+                            egui::Color32::from_rgba_unmultiplied(255, 80, 0, alpha),
+                        );
+                    }
+                }
+            }
+
+            // ── F5: flowfield arrows (drawn above density) ────────────────────
+            if let Some(arrows) = flowfield_arrows {
+                if !arrows.is_empty() {
+                    let painter = ctx.layer_painter(egui::LayerId::new(
+                        egui::Order::Background,
+                        egui::Id::new("flowfield_arrows"),
+                    ));
+                    let arrow_stroke = egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_unmultiplied(0, 220, 255, 180),
+                    );
+                    for arrow in arrows {
+                        painter.line_segment([arrow.from, arrow.to], arrow_stroke);
+                        // Small dot at the tip to indicate direction.
+                        painter.circle_filled(
+                            arrow.to,
+                            2.0,
+                            egui::Color32::from_rgba_unmultiplied(0, 220, 255, 220),
+                        );
+                    }
+                }
+            }
+
             // ── F4: unit debug circles drawn on a background layer ───────────
             if let Some(draws) = unit_draws {
                 let painter = ctx.layer_painter(egui::LayerId::new(
@@ -160,6 +238,11 @@ impl DebugOverlay {
                                     "Camera: ({:.1}, {:.1})  dist {:.1}  zoom {:.0}%",
                                     stats.camera_target.0, stats.camera_target.1,
                                     stats.camera_distance, stats.camera_zoom_pct
+                                ));
+                                ui.label(format!(
+                                    "Pathfinding: {:.2} ms  Recomputes: {}",
+                                    stats.pathfinding_ms,
+                                    stats.flowfield_recomputes,
                                 ));
                             });
                     });
