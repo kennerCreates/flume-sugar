@@ -44,7 +44,7 @@ const DENSITY_UPDATE_INTERVAL: u32 = 8;
 const FORM_WIDE: u32 = 15;
 /// World-unit spacing between formation slots and between spawned unit centres.
 /// Units have diameter 1.0, so 2.0 here = 1.0 unit of clear gap between surfaces.
-const FORM_SPACING: f32 = 2.0;
+const FORM_SPACING: f32 = 1.5;
 /// Slot-pull strength: max fraction of max_speed applied toward the formation slot.
 /// Higher than before because intra-group ORCA is off — the slot pull is the only
 /// force maintaining formation shape and driving post-crossing reformation.
@@ -679,8 +679,10 @@ impl State {
                 let p = tf.position;
                 let v = vel.linear;
                 let arrived = groups.get(gm.group_id as usize).map(|g| {
-                    let dx = g.goal_world.x - p.x;
-                    let dz = g.goal_world.z - p.z;
+                    // Arrive at the unit's own formation slot at the goal, not at
+                    // the goal point itself — otherwise all units clump at one spot.
+                    let dx = g.goal_world.x + fo.offset.x - p.x;
+                    let dz = g.goal_world.z + fo.offset.y - p.z;
                     (dx * dx + dz * dz).sqrt() < ARRIVAL_RADIUS
                 }).unwrap_or(false);
                 UnitSnap {
