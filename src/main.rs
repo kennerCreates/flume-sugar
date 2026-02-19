@@ -16,12 +16,13 @@ use engine::{Transform, Color as EntityColor, Velocity, GroupMembership, UnitAge
 use engine::{NavigationGrid, FlowField, compute_flowfield, GRID_WIDTH, GRID_HEIGHT};
 use engine::{AgentSnapshot, SpatialGrid, compute_orca_velocity};
 use engine::camera::RtsCamera;
-use engine::debug_overlay::{DebugOverlay, DebugStats};
+use engine::debug_overlay::{DebugOverlay, DebugStats, UnitDebugDraw};
 use engine::input::InputState;
 use engine::mesh::GpuVertex;
+use egui;
 
 /// Movement speed for all units (world units per second).
-const UNIT_SPEED: f32 = 5.0;
+const UNIT_SPEED: f32 = 2.5;
 /// Physical collision radius of each unit (matches the procedural sphere mesh).
 const UNIT_RADIUS: f32 = 0.5;
 /// Units within this world-space distance of their goal are considered arrived.
@@ -162,18 +163,12 @@ struct UnitGroup {
     flow_field: FlowField,
 }
 
-/// Build the 8 crossing groups and compute their flowfields.
+/// Build 2 head-on groups and compute their flowfields.
 fn create_crossing_groups(nav_grid: &NavigationGrid) -> Vec<UnitGroup> {
     // (start_xz, goal_xz, rgb)
     let defs: &[([f32; 2], [f32; 2], [f32; 3])] = &[
-        ([-35.0, -35.0], [ 35.0,  35.0], [1.00, 0.15, 0.15]), // NW → SE  Red
-        ([  0.0, -35.0], [  0.0,  35.0], [1.00, 0.55, 0.10]), // N  → S   Orange
-        ([ 35.0, -35.0], [-35.0,  35.0], [0.90, 0.90, 0.10]), // NE → SW  Yellow
-        ([ 35.0,   0.0], [-35.0,   0.0], [0.10, 0.90, 0.10]), // E  → W   Green
-        ([ 35.0,  35.0], [-35.0, -35.0], [0.10, 0.85, 0.90]), // SE → NW  Cyan
-        ([  0.0,  35.0], [  0.0, -35.0], [0.10, 0.15, 1.00]), // S  → N   Blue
-        ([-35.0,  35.0], [ 35.0, -35.0], [0.65, 0.10, 0.90]), // SW → NE  Purple
-        ([-35.0,   0.0], [ 35.0,   0.0], [0.90, 0.15, 0.60]), // W  → E   Magenta
+        ([-35.0, 0.0], [35.0, 0.0], [1.00, 0.20, 0.20]), // W → E  Red
+        ([ 35.0, 0.0], [-35.0, 0.0], [0.20, 0.50, 1.00]), // E → W  Blue
     ];
 
     defs.iter().enumerate().map(|(i, (start_xz, goal_xz, color))| {
@@ -233,6 +228,8 @@ struct State {
 
     // Debug overlay (egui)
     debug_overlay: DebugOverlay,
+    /// F4 toggle: draw avoidance-radius circles and velocity arrows per unit.
+    debug_units_visible: bool,
 }
 
 impl State {
@@ -449,7 +446,7 @@ impl State {
         let num_indices = render_mesh.index_count() as u32;
 
         // Instance buffer for per-entity position+color (shared across all entities)
-        let max_instances = 600;
+        let max_instances = 150;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Instance Buffer"),
             size: (max_instances * std::mem::size_of::<InstanceData>()) as u64,
@@ -537,6 +534,7 @@ impl State {
             fps_counter: 0,
             current_fps: 0,
             debug_overlay,
+            debug_units_visible: false,
         }
     }
 
@@ -559,6 +557,9 @@ impl State {
 
         if self.input.is_key_just_pressed(KeyCode::F3) {
             self.debug_overlay.toggle();
+        }
+        if self.input.is_key_just_pressed(KeyCode::F4) {
+            self.debug_units_visible = !self.debug_units_visible;
         }
 
         self.camera.update(&self.input, dt);
@@ -759,34 +760,69 @@ impl State {
             render_pass.draw_indexed(0..self.num_indices, 0, 0..instance_count as u32);
         }
 
-        // Debug overlay (egui)
-        if self.debug_overlay.visible {
-            let entity_count = self.world.query::<&Transform>().iter(&self.world).count();
-            let (avg, min, max) = if !self.frame_times.is_empty() {
-                let avg = self.frame_times.iter().sum::<f32>() / self.frame_times.len() as f32;
-                let min = self.frame_times.iter().copied().fold(f32::INFINITY, f32::min);
-                let max = self.frame_times.iter().copied().fold(0.0_f32, f32::max);
-                (avg, min, max)
-            } else {
-                (0.0, 0.0, 0.0)
-            };
+        // Debug overlay (egui) — F3 = stats panel, F4 = unit debug circles.
+        // Run one egui frame covering both so we tessellate only once.
+        if self.debug_overlay.visible || self.debug_units_visible {
+            let ppp = window.scale_factor() as f32;
+            let sw  = self.config.width  as f32;
+            let sh  = self.config.height as f32;
 
-            let stats = DebugStats {
-                fps: self.current_fps,
-                frame_time_avg_ms: avg * 1000.0,
-                frame_time_min_ms: min * 1000.0,
-                frame_time_max_ms: max * 1000.0,
-                entity_count,
-                draw_calls: 1,
-                resolution: (self.config.width, self.config.height),
-                camera_target: (self.camera.target().x, self.camera.target().y),
-                camera_distance: self.camera.distance(),
-                camera_zoom_pct: self.camera.zoom_fraction() * 100.0,
-            };
+            // ── F3 stats ────────────────────────────────────────────────────
+            let stats: Option<DebugStats> = if self.debug_overlay.visible {
+                let entity_count = self.world.query::<&Transform>().iter(&self.world).count();
+                let (avg, mn, mx) = if !self.frame_times.is_empty() {
+                    let avg = self.frame_times.iter().sum::<f32>() / self.frame_times.len() as f32;
+                    let mn  = self.frame_times.iter().copied().fold(f32::INFINITY, f32::min);
+                    let mx  = self.frame_times.iter().copied().fold(0.0_f32, f32::max);
+                    (avg, mn, mx)
+                } else { (0.0, 0.0, 0.0) };
+
+                Some(DebugStats {
+                    fps: self.current_fps,
+                    frame_time_avg_ms: avg * 1000.0,
+                    frame_time_min_ms: mn  * 1000.0,
+                    frame_time_max_ms: mx  * 1000.0,
+                    entity_count,
+                    draw_calls: 1,
+                    resolution: (self.config.width, self.config.height),
+                    camera_target: (self.camera.target().x, self.camera.target().y),
+                    camera_distance: self.camera.distance(),
+                    camera_zoom_pct: self.camera.zoom_fraction() * 100.0,
+                })
+            } else { None };
+
+            // ── F4 unit debug ────────────────────────────────────────────────
+            let unit_draws: Option<Vec<UnitDebugDraw>> = if self.debug_units_visible {
+                let aspect = sw / sh;
+                let vp = self.camera.view_projection(aspect);
+
+                let draws = {
+                    let mut q = self.world.query::<(&Transform, &Velocity, &UnitAgent)>();
+                    q.iter(&self.world).filter_map(|(tf, vel, agent)| {
+                        let p = tf.position;
+
+                        let center = world_to_screen(p, vp, sw, sh, ppp)?;
+
+                        // Velocity arrow: project 0.5 s of travel ahead.
+                        let tip_world = p + vel.linear * 0.5;
+                        let vel_tip = world_to_screen(tip_world, vp, sw, sh, ppp)
+                            .unwrap_or(center);
+
+                        // Avoidance radius: project a point one radius to the right.
+                        let edge_world = Vec3::new(p.x + agent.radius, p.y, p.z);
+                        let radius_px = world_to_screen(edge_world, vp, sw, sh, ppp)
+                            .map(|ep| ((ep.x - center.x).powi(2) + (ep.y - center.y).powi(2)).sqrt())
+                            .unwrap_or(5.0);
+
+                        Some(UnitDebugDraw { pos: center, vel_tip, radius_px })
+                    }).collect()
+                };
+                Some(draws)
+            } else { None };
 
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [self.config.width, self.config.height],
-                pixels_per_point: window.scale_factor() as f32,
+                pixels_per_point: ppp,
             };
 
             self.debug_overlay.render(
@@ -796,7 +832,8 @@ impl State {
                 window,
                 &view,
                 &screen_descriptor,
-                &stats,
+                stats.as_ref(),
+                unit_draws.as_deref(),
             );
         }
 
@@ -810,10 +847,10 @@ impl State {
 // ENTITY SPAWNING
 // ============================================================================
 
-/// Spawn 250 units per group in a battle-line formation oriented perpendicular
+/// Spawn 75 units per group in a battle-line formation oriented perpendicular
 /// to each group's travel direction so it reads clearly from any camera angle.
 ///
-/// Layout: 25 wide (⟂ to travel) × 10 deep (∥ to travel) = 250 exactly.
+/// Layout: 15 wide (⟂ to travel) × 5 deep (∥ to travel) = 75 exactly.
 fn spawn_crossing_scene(world: &mut World, groups: &[UnitGroup]) {
     const FORM_WIDE: u32 = 15; // units perpendicular to travel direction
     const FORM_DEEP: u32 = 5;  // units along travel direction
@@ -967,6 +1004,27 @@ impl ApplicationHandler for App {
             window.request_redraw();
         }
     }
+}
+
+/// Project a world-space position to egui screen points.
+///
+/// Returns `None` if the point is behind the camera or far off-screen.
+/// `ppp` = pixels_per_point (window DPI scale factor).
+fn world_to_screen(
+    world: Vec3,
+    vp: glam::Mat4,
+    sw_px: f32,
+    sh_px: f32,
+    ppp: f32,
+) -> Option<egui::Pos2> {
+    let clip = vp * glam::Vec4::new(world.x, world.y, world.z, 1.0);
+    if clip.w <= 0.0 { return None; }
+    let nx = clip.x / clip.w;
+    let ny = clip.y / clip.w;
+    if nx < -1.2 || nx > 1.2 || ny < -1.2 || ny > 1.2 { return None; }
+    let px = (nx + 1.0) * 0.5 * sw_px / ppp;
+    let py = (1.0 - ny) * 0.5 * sh_px / ppp;
+    Some(egui::pos2(px, py))
 }
 
 fn main() {

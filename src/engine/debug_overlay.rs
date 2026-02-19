@@ -13,6 +13,16 @@ pub struct DebugStats {
     pub camera_zoom_pct: f32,
 }
 
+/// One unit's debug draw data, already projected to egui screen points.
+pub struct UnitDebugDraw {
+    /// Unit centre in egui screen points.
+    pub pos: egui::Pos2,
+    /// Tip of the velocity arrow (0.5 s ahead) in egui screen points.
+    pub vel_tip: egui::Pos2,
+    /// Avoidance-radius circle size in screen points.
+    pub radius_px: f32,
+}
+
 pub struct DebugOverlay {
     pub visible: bool,
     egui_ctx: egui::Context,
@@ -77,6 +87,10 @@ impl DebugOverlay {
         self.egui_state.on_window_event(window, event)
     }
 
+    /// Render one egui frame covering both optional layers:
+    ///
+    /// - `stats`      — F3 stats panel (`None` = hidden).
+    /// - `unit_draws` — F4 per-unit radius circles + velocity arrows (`None` = hidden).
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -85,39 +99,71 @@ impl DebugOverlay {
         window: &winit::window::Window,
         view: &wgpu::TextureView,
         screen_descriptor: &egui_wgpu::ScreenDescriptor,
-        stats: &DebugStats,
+        stats: Option<&DebugStats>,
+        unit_draws: Option<&[UnitDebugDraw]>,
     ) {
         let raw_input = self.egui_state.take_egui_input(window);
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            egui::Area::new(egui::Id::new("debug_overlay"))
-                .fixed_pos(egui::pos2(10.0, 10.0))
-                .show(ctx, |ui| {
-                    egui::Frame::none()
-                        .fill(egui::Color32::from_rgba_premultiplied(0, 0, 0, 180))
-                        .inner_margin(egui::Margin::same(8.0))
-                        .rounding(4.0)
-                        .show(ui, |ui: &mut egui::Ui| {
-                            ui.label(format!("FPS: {}", stats.fps));
-                            ui.label(format!(
-                                "Frame: {:.2} ms (min: {:.1} | max: {:.1})",
-                                stats.frame_time_avg_ms,
-                                stats.frame_time_min_ms,
-                                stats.frame_time_max_ms
-                            ));
-                            ui.label(format!("Entities: {}", stats.entity_count));
-                            ui.label(format!("Draw calls: {}", stats.draw_calls));
-                            ui.label(format!(
-                                "Resolution: {} x {}",
-                                stats.resolution.0, stats.resolution.1
-                            ));
-                            ui.label(format!(
-                                "Camera: ({:.1}, {:.1})  dist {:.1}  zoom {:.0}%",
-                                stats.camera_target.0, stats.camera_target.1,
-                                stats.camera_distance, stats.camera_zoom_pct
-                            ));
-                        });
-                });
+            // ── F4: unit debug circles drawn on a background layer ───────────
+            if let Some(draws) = unit_draws {
+                let painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Background,
+                    egui::Id::new("unit_debug"),
+                ));
+                let radius_stroke = egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(255, 220, 0, 160),
+                );
+                let vel_stroke = egui::Stroke::new(
+                    2.0,
+                    egui::Color32::from_rgba_unmultiplied(80, 255, 140, 220),
+                );
+                for draw in draws {
+                    // Avoidance-radius circle
+                    painter.circle_stroke(draw.pos, draw.radius_px, radius_stroke);
+                    // Velocity direction arrow
+                    painter.line_segment([draw.pos, draw.vel_tip], vel_stroke);
+                    // Arrowhead dot at the tip
+                    painter.circle_filled(
+                        draw.vel_tip,
+                        2.5,
+                        egui::Color32::from_rgba_unmultiplied(80, 255, 140, 220),
+                    );
+                }
+            }
+
+            // ── F3: stats panel ──────────────────────────────────────────────
+            if let Some(stats) = stats {
+                egui::Area::new(egui::Id::new("debug_overlay"))
+                    .fixed_pos(egui::pos2(10.0, 10.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_rgba_premultiplied(0, 0, 0, 180))
+                            .inner_margin(egui::Margin::same(8.0))
+                            .rounding(4.0)
+                            .show(ui, |ui: &mut egui::Ui| {
+                                ui.label(format!("FPS: {}", stats.fps));
+                                ui.label(format!(
+                                    "Frame: {:.2} ms (min: {:.1} | max: {:.1})",
+                                    stats.frame_time_avg_ms,
+                                    stats.frame_time_min_ms,
+                                    stats.frame_time_max_ms
+                                ));
+                                ui.label(format!("Entities: {}", stats.entity_count));
+                                ui.label(format!("Draw calls: {}", stats.draw_calls));
+                                ui.label(format!(
+                                    "Resolution: {} x {}",
+                                    stats.resolution.0, stats.resolution.1
+                                ));
+                                ui.label(format!(
+                                    "Camera: ({:.1}, {:.1})  dist {:.1}  zoom {:.0}%",
+                                    stats.camera_target.0, stats.camera_target.1,
+                                    stats.camera_distance, stats.camera_zoom_pct
+                                ));
+                            });
+                    });
+            }
         });
 
         self.egui_state
