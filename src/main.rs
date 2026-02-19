@@ -43,7 +43,8 @@ const DENSITY_UPDATE_INTERVAL: u32 = 8;
 /// Formation columns (perpendicular to travel). Shared by spawner and formation system.
 const FORM_WIDE: u32 = 15;
 /// World-unit spacing between formation slots and between spawned unit centres.
-const FORM_SPACING: f32 = 0.85;
+/// Units have diameter 1.0, so 2.0 here = 1.0 unit of clear gap between surfaces.
+const FORM_SPACING: f32 = 2.0;
 /// Slot-pull strength: max fraction of max_speed applied toward the formation slot.
 /// Higher than before because intra-group ORCA is off — the slot pull is the only
 /// force maintaining formation shape and driving post-crossing reformation.
