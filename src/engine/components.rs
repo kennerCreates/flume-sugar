@@ -24,18 +24,6 @@ impl Transform {
     }
 }
 
-/// Velocity for moving entities
-#[derive(Component, Debug, Clone, Copy)]
-pub struct Velocity {
-    pub linear: Vec3,  // Units per second
-}
-
-impl Velocity {
-    pub fn new(linear: Vec3) -> Self {
-        Self { linear }
-    }
-}
-
 /// RGB color for rendering
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Color {
@@ -43,16 +31,3 @@ pub struct Color {
     pub g: f32,
     pub b: f32,
 }
-
-impl Color {
-    pub fn random() -> Self {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        Self {
-            r: rng.r#gen(),
-            g: rng.r#gen(),
-            b: rng.r#gen(),
-        }
-    }
-}
-

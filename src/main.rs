@@ -1,6 +1,5 @@
-// ECS-powered 3D rendering with INSTANCED rendering
-// Draws 1000s of entities in a single draw call
-// See docs/research/ecs-choice.md for ECS architecture decisions
+// Procedural modeling demo: single vertex → Skin Modifier → Catmull-Clark ×2 → near-sphere
+// See docs/research/procedural-modeling.md for pipeline decisions.
 
 mod engine;
 
@@ -13,47 +12,14 @@ use winit::{
 };
 use glam::{Mat4, Vec3};
 use bevy_ecs::prelude::*;
-use engine::{Transform, Velocity, Color as EntityColor};
+use engine::{Transform, Color as EntityColor};
 use engine::camera::RtsCamera;
 use engine::debug_overlay::{DebugOverlay, DebugStats};
 use engine::input::InputState;
+use engine::mesh::GpuVertex;
 
 // ============================================================================
-// VERTEX DEFINITION
-// ============================================================================
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-}
-
-impl Vertex {
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                // Position
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                // Normal
-                wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-            ],
-        }
-    }
-}
-
-// ============================================================================
-// INSTANCE DATA (per-entity)
+// INSTANCE DATA (per-entity, passed alongside the shared procedural mesh)
 // ============================================================================
 
 #[repr(C)]
@@ -68,7 +34,7 @@ impl InstanceData {
     fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<InstanceData>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,  // One per instance, not per vertex
+            step_mode: wgpu::VertexStepMode::Instance,
             attributes: &[
                 // Position (location 2, after vertex position and normal)
                 wgpu::VertexAttribute {
@@ -87,54 +53,6 @@ impl InstanceData {
     }
 }
 
-// Cube vertices with normals (24 vertices, 4 per face for proper flat shading)
-const CUBE_VERTICES: &[Vertex] = &[
-    // Front face (normal: [0, 0, 1])
-    Vertex { position: [-0.1, -0.1,  0.1], normal: [0.0, 0.0, 1.0] },
-    Vertex { position: [ 0.1, -0.1,  0.1], normal: [0.0, 0.0, 1.0] },
-    Vertex { position: [ 0.1,  0.1,  0.1], normal: [0.0, 0.0, 1.0] },
-    Vertex { position: [-0.1,  0.1,  0.1], normal: [0.0, 0.0, 1.0] },
-
-    // Back face (normal: [0, 0, -1])
-    Vertex { position: [ 0.1, -0.1, -0.1], normal: [0.0, 0.0, -1.0] },
-    Vertex { position: [-0.1, -0.1, -0.1], normal: [0.0, 0.0, -1.0] },
-    Vertex { position: [-0.1,  0.1, -0.1], normal: [0.0, 0.0, -1.0] },
-    Vertex { position: [ 0.1,  0.1, -0.1], normal: [0.0, 0.0, -1.0] },
-
-    // Left face (normal: [-1, 0, 0])
-    Vertex { position: [-0.1, -0.1, -0.1], normal: [-1.0, 0.0, 0.0] },
-    Vertex { position: [-0.1, -0.1,  0.1], normal: [-1.0, 0.0, 0.0] },
-    Vertex { position: [-0.1,  0.1,  0.1], normal: [-1.0, 0.0, 0.0] },
-    Vertex { position: [-0.1,  0.1, -0.1], normal: [-1.0, 0.0, 0.0] },
-
-    // Right face (normal: [1, 0, 0])
-    Vertex { position: [ 0.1, -0.1,  0.1], normal: [1.0, 0.0, 0.0] },
-    Vertex { position: [ 0.1, -0.1, -0.1], normal: [1.0, 0.0, 0.0] },
-    Vertex { position: [ 0.1,  0.1, -0.1], normal: [1.0, 0.0, 0.0] },
-    Vertex { position: [ 0.1,  0.1,  0.1], normal: [1.0, 0.0, 0.0] },
-
-    // Top face (normal: [0, 1, 0])
-    Vertex { position: [-0.1,  0.1,  0.1], normal: [0.0, 1.0, 0.0] },
-    Vertex { position: [ 0.1,  0.1,  0.1], normal: [0.0, 1.0, 0.0] },
-    Vertex { position: [ 0.1,  0.1, -0.1], normal: [0.0, 1.0, 0.0] },
-    Vertex { position: [-0.1,  0.1, -0.1], normal: [0.0, 1.0, 0.0] },
-
-    // Bottom face (normal: [0, -1, 0])
-    Vertex { position: [-0.1, -0.1, -0.1], normal: [0.0, -1.0, 0.0] },
-    Vertex { position: [ 0.1, -0.1, -0.1], normal: [0.0, -1.0, 0.0] },
-    Vertex { position: [ 0.1, -0.1,  0.1], normal: [0.0, -1.0, 0.0] },
-    Vertex { position: [-0.1, -0.1,  0.1], normal: [0.0, -1.0, 0.0] },
-];
-
-const CUBE_INDICES: &[u16] = &[
-    0, 1, 2,  0, 2, 3,    // Front
-    4, 5, 6,  4, 6, 7,    // Back
-    8, 9, 10,  8, 10, 11,  // Left
-    12, 13, 14,  12, 14, 15, // Right
-    16, 17, 18,  16, 18, 19, // Top
-    20, 21, 22,  20, 22, 23, // Bottom
-];
-
 // ============================================================================
 // UNIFORM DATA (camera and lighting)
 // ============================================================================
@@ -144,7 +62,7 @@ const CUBE_INDICES: &[u16] = &[
 struct Uniforms {
     view_proj: [[f32; 4]; 4],
     camera_pos: [f32; 3],
-    _padding: u32,  // Align to 16 bytes (WGSL requirement)
+    _padding: u32,
 }
 
 impl Uniforms {
@@ -161,20 +79,45 @@ impl Uniforms {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct LightUniform {
     direction: [f32; 3],
-    _padding: u32,  // Align to 16 bytes (WGSL requirement)
+    _padding: u32,
     color: [f32; 3],
-    _padding2: u32,  // Align to 16 bytes (WGSL requirement)
+    _padding2: u32,
 }
 
 impl LightUniform {
     fn new() -> Self {
         Self {
-            direction: [-0.3, -0.5, -0.6],  // Pointing down and to the side
+            direction: [-0.3, -0.5, -0.6],
             _padding: 0,
-            color: [1.0, 1.0, 1.0],  // White light
+            color: [1.0, 1.0, 1.0],
             _padding2: 0,
         }
     }
+}
+
+// ============================================================================
+// PROCEDURAL MESH PIPELINE
+// ============================================================================
+
+/// Build the test mesh: single vertex → Skin Modifier (cube) → Catmull-Clark ×2.
+/// Returns a GPU-ready RenderMesh with smooth normals (98 verts, 576 indices).
+fn build_procedural_sphere() -> engine::mesh::RenderMesh {
+    use engine::{SkinGraph, skin_modifier, subdivide, triangulate_smooth};
+
+    // Step 1: SkinGraph — single vertex at origin, radius 0.5
+    let mut graph = SkinGraph::new();
+    graph.add_node(Vec3::ZERO, 0.5);
+
+    // Step 2: Skin Modifier → cube (8 verts, 6 quad faces)
+    let cube_mesh = skin_modifier(&graph);
+
+    // Step 3: Catmull-Clark ×2
+    let subd_mesh = subdivide(&cube_mesh, 2);
+
+    // Step 4: Triangulate + smooth normals
+    let render_mesh = triangulate_smooth(&subd_mesh);
+
+    render_mesh
 }
 
 // ============================================================================
@@ -237,7 +180,6 @@ impl State {
         });
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         (texture, view)
     }
 
@@ -291,7 +233,6 @@ impl State {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-
         surface.configure(&device, &config);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -300,7 +241,6 @@ impl State {
         });
 
         let uniforms = Uniforms::new();
-
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniform Buffer"),
             contents: bytemuck::cast_slice(&[uniforms]),
@@ -311,7 +251,7 @@ impl State {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,  // Both shaders need uniforms
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -331,7 +271,6 @@ impl State {
             label: Some("uniform_bind_group"),
         });
 
-        // Light uniform buffer and bind group
         let light_uniform = LightUniform::new();
         let light_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Light Buffer"),
@@ -343,7 +282,7 @@ impl State {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,  // Light is used in fragment shader
+                    visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -376,7 +315,8 @@ impl State {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc(), InstanceData::desc()],  // Vertex + Instance buffers
+                // GpuVertex has the same layout as the old Vertex (locations 0, 1)
+                buffers: &[GpuVertex::desc(), InstanceData::desc()],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -416,20 +356,25 @@ impl State {
 
         use wgpu::util::DeviceExt;
 
+        // Generate the procedural sphere mesh (single vertex → skin → CC×2)
+        let render_mesh = build_procedural_sphere();
+
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(CUBE_VERTICES),
+            label: Some("Procedural Vertex Buffer"),
+            contents: render_mesh.vertex_bytes(),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
         let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Index Buffer"),
-            contents: bytemuck::cast_slice(CUBE_INDICES),
+            label: Some("Procedural Index Buffer"),
+            contents: render_mesh.index_bytes(),
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // Create instance buffer (large enough for many instances)
-        let max_instances = 10000;
+        let num_indices = render_mesh.index_count() as u32;
+
+        // Instance buffer for per-entity position+color (shared across all entities)
+        let max_instances = 1000;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Instance Buffer"),
             size: (max_instances * std::mem::size_of::<InstanceData>()) as u64,
@@ -437,17 +382,12 @@ impl State {
             mapped_at_creation: false,
         });
 
-        let num_indices = CUBE_INDICES.len() as u32;
-
-        // Create depth texture
         let (depth_texture, depth_view) = Self::create_depth_texture(&device, &config);
-
-        // Create debug overlay
         let debug_overlay = DebugOverlay::new(&window, &device, config.format);
 
-        // Create ECS world and spawn test entities
+        // ECS world — static procedural test scene (no Velocity, no movement)
         let mut world = World::new();
-        spawn_test_entities(&mut world, 1000);
+        spawn_procedural_test_scene(&mut world);
 
         Self {
             surface,
@@ -488,8 +428,6 @@ impl State {
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-
-            // Recreate depth texture with new size
             let (depth_texture, depth_view) = Self::create_depth_texture(&self.device, &self.config);
             self.depth_texture = depth_texture;
             self.depth_view = depth_view;
@@ -501,68 +439,19 @@ impl State {
         let dt = (now - self.last_update).as_secs_f32();
         self.last_update = now;
 
-        // One-shot key actions (toggle overlay, future modal actions)
         if self.input.is_key_just_pressed(KeyCode::F3) {
             self.debug_overlay.toggle();
         }
 
         self.camera.update(&self.input, dt);
-
-        // Update ECS systems
-        let bounds = Vec3::new(20.0, 10.0, 20.0);
-
-        // Movement system
-        let mut query = self.world.query::<(&mut Transform, &Velocity)>();
-        for (mut transform, velocity) in query.iter_mut(&mut self.world) {
-            transform.position += velocity.linear * dt;
-        }
-
-        // Bounds system - redirect velocity toward random point when leaving area
-        let mut query = self.world.query::<(&mut Transform, &mut Velocity)>();
-        let half_bounds = bounds / 2.0;
-        for (transform, mut velocity) in query.iter_mut(&mut self.world) {
-            let mut out_of_bounds = false;
-
-            // Check if out of bounds on any axis
-            if transform.position.x > half_bounds.x || transform.position.x < -half_bounds.x {
-                out_of_bounds = true;
-            }
-            if transform.position.z > half_bounds.z || transform.position.z < -half_bounds.z {
-                out_of_bounds = true;
-            }
-            if transform.position.y < 0.0 || transform.position.y > bounds.y {
-                out_of_bounds = true;
-            }
-
-            // If out of bounds, redirect velocity toward a random point within bounds
-            if out_of_bounds {
-                use rand::Rng;
-                let mut rng = rand::thread_rng();
-
-                // Pick random target position within bounds (with margin)
-                let target = Vec3::new(
-                    rng.gen_range(-half_bounds.x + 1.0..half_bounds.x - 1.0),
-                    rng.gen_range(1.0..bounds.y - 1.0),
-                    rng.gen_range(-half_bounds.z + 1.0..half_bounds.z - 1.0),
-                );
-
-                // Calculate direction to target
-                let direction = (target - transform.position).normalize();
-
-                // Keep similar speed but change direction
-                let current_speed = velocity.linear.length();
-                velocity.linear = direction * current_speed;
-            }
-        }
+        // No movement system — test scene entities are static (no Velocity component)
     }
 
     fn render(&mut self, window: &winit::window::Window) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Collect instance data from ECS BEFORE creating render pass
+        // Collect instance data from ECS
         let mut instance_data = Vec::new();
         let mut query = self.world.query::<(&Transform, &EntityColor)>();
         for (transform, color) in query.iter(&self.world) {
@@ -574,8 +463,6 @@ impl State {
         }
 
         let instance_count = instance_data.len().min(self.max_instances);
-
-        // Write instance data to buffer BEFORE render pass
         if !instance_data.is_empty() {
             self.queue.write_buffer(
                 &self.instance_buffer,
@@ -591,15 +478,11 @@ impl State {
             camera_pos: self.camera.camera_position().to_array(),
             _padding: 0,
         };
-
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
-        // NOW create render pass (after all buffer writes)
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Render Encoder"),
+        });
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -608,12 +491,7 @@ impl State {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05,
-                            g: 0.05,
-                            b: 0.1,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.1, a: 1.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -633,14 +511,13 @@ impl State {
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_bind_group(1, &self.light_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));  // Instance data
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-
-            // ONE DRAW CALL for all instances!
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+            // u32 indices — needed for procedural meshes that can exceed 65535 vertices
+            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.draw_indexed(0..self.num_indices, 0, 0..instance_count as u32);
         }
 
-        // Debug overlay (egui) — renders on top of 3D scene
+        // Debug overlay (egui)
         if self.debug_overlay.visible {
             let entity_count = self.world.query::<&Transform>().iter(&self.world).count();
             let (avg, min, max) = if !self.frame_times.is_empty() {
@@ -683,40 +560,46 @@ impl State {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-
         Ok(())
     }
 }
 
 // ============================================================================
-// ENTITY SPAWNING
+// PROCEDURAL TEST SCENE
 // ============================================================================
 
-fn spawn_test_entities(world: &mut World, count: usize) {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+/// Spawn 8 static sphere-like entities in a 2×2×2 arrangement.
+/// No Velocity component — static test scene for inspecting the procedural mesh.
+fn spawn_procedural_test_scene(world: &mut World) {
+    let s = 3.0_f32;  // spacing between entities
 
-    for _ in 0..count {
-        let position = Vec3::new(
-            rng.gen_range(-10.0..10.0),
-            rng.gen_range(0.0..8.0),
-            rng.gen_range(-10.0..10.0),
-        );
+    let positions = [
+        Vec3::new(-s * 0.5, 2.0, -s * 0.5),
+        Vec3::new( s * 0.5, 2.0, -s * 0.5),
+        Vec3::new(-s * 0.5, 2.0,  s * 0.5),
+        Vec3::new( s * 0.5, 2.0,  s * 0.5),
+        Vec3::new(-s * 0.5, 2.0 + s, -s * 0.5),
+        Vec3::new( s * 0.5, 2.0 + s, -s * 0.5),
+        Vec3::new(-s * 0.5, 2.0 + s,  s * 0.5),
+        Vec3::new( s * 0.5, 2.0 + s,  s * 0.5),
+    ];
 
-        let velocity = Vec3::new(
-            rng.gen_range(-2.0..2.0),
-            rng.gen_range(-1.0..1.0),
-            rng.gen_range(-2.0..2.0),
-        );
+    let colors = [
+        EntityColor { r: 1.0, g: 0.3, b: 0.3 },  // red
+        EntityColor { r: 0.3, g: 1.0, b: 0.3 },  // green
+        EntityColor { r: 0.3, g: 0.3, b: 1.0 },  // blue
+        EntityColor { r: 1.0, g: 1.0, b: 0.3 },  // yellow
+        EntityColor { r: 1.0, g: 0.3, b: 1.0 },  // magenta
+        EntityColor { r: 0.3, g: 1.0, b: 1.0 },  // cyan
+        EntityColor { r: 1.0, g: 0.6, b: 0.2 },  // orange
+        EntityColor { r: 0.8, g: 0.8, b: 0.8 },  // white
+    ];
 
-        world.spawn((
-            Transform::from_position(position),
-            Velocity::new(velocity),
-            EntityColor::random(),
-        ));
+    for (pos, color) in positions.iter().zip(colors.iter()) {
+        world.spawn((Transform::from_position(*pos), *color));
     }
 
-    println!("Spawned {} entities", count);
+    println!("Spawned {} procedural sphere entities", positions.len());
 }
 
 // ============================================================================
@@ -732,7 +615,7 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             let window_attributes = Window::default_attributes()
-                .with_title("Flume Sugar - Instanced Rendering Demo (1000 entities, 1 draw call!)")
+                .with_title("Flume Sugar - Procedural Mesh: Skin + Catmull-Clark ×2")
                 .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
 
             let window = std::sync::Arc::new(
@@ -740,7 +623,6 @@ impl ApplicationHandler for App {
             );
 
             let state = pollster::block_on(State::new(&window));
-
             self.window = Some(window);
             self.state = Some(state);
         }
@@ -755,19 +637,17 @@ impl ApplicationHandler for App {
         let Some(window) = &self.window else { return };
         let Some(state) = &mut self.state else { return };
 
-        // Forward events to egui and input system
         let _ = state.debug_overlay.handle_window_event(window, &event);
         state.input.process_event(&event);
 
         match event {
             WindowEvent::CloseRequested
             | WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::Escape),
-                        ..
-                    },
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(KeyCode::Escape),
+                    ..
+                },
                 ..
             } => {
                 event_loop.exit();
@@ -786,14 +666,12 @@ impl ApplicationHandler for App {
                     Err(e) => eprintln!("{:?}", e),
                 }
 
-                // Track frame time
                 let frame_time = frame_start.elapsed().as_secs_f32();
                 state.frame_times.push(frame_time);
                 if state.frame_times.len() > 100 {
                     state.frame_times.remove(0);
                 }
 
-                // Update FPS counter and window title
                 state.fps_counter += 1;
                 let now = std::time::Instant::now();
                 if (now - state.last_fps_update).as_secs_f32() >= 1.0 {
@@ -801,7 +679,6 @@ impl ApplicationHandler for App {
                     state.fps_counter = 0;
                     state.last_fps_update = now;
 
-                    // Update window title with debug info
                     let avg_frame_time = if !state.frame_times.is_empty() {
                         state.frame_times.iter().sum::<f32>() / state.frame_times.len() as f32
                     } else {

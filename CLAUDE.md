@@ -67,13 +67,16 @@ Code is organized by system under `src/`. Use `src/engine/` for lower-level syst
 
 ```
 src/
-  main.rs              — App entry point, State struct, winit event loop
+  main.rs              — App entry point, State struct, winit event loop, build_procedural_sphere()
   engine/
     mod.rs             — Module registration and re-exports
     camera.rs          — RtsCamera: RTS-style camera with WASD/zoom/edge-scroll
-    components.rs      — ECS components (Transform, Velocity, Color)
+    components.rs      — ECS components (Transform, Color)
     debug_overlay.rs   — egui debug overlay (F3)
     input.rs           — InputState: keyboard and mouse state from winit events
+    mesh.rs            — GpuVertex, PolyMesh, RenderMesh, triangulate_smooth()
+    skin.rs            — SkinGraph, skin_modifier() (vertex graph → quad PolyMesh)
+    subdivide.rs       — catmull_clark(), subdivide() (Catmull-Clark subdivision)
     systems.rs         — ECS systems (placeholder)
 ```
 
@@ -132,10 +135,13 @@ The application follows a standard wgpu rendering pipeline:
 
 ### Key Components
 
-**Geometry** (`CUBE_VERTICES` and `CUBE_INDICES` constants):
-- 24 vertices (4 per face) with position and normal attributes — duplicated per face for flat shading
-- 36 indices (6 faces × 2 triangles × 3 vertices) defining triangle topology
-- Counter-clockwise winding order for front faces
+**Geometry** (procedural pipeline — see `docs/research/procedural-modeling.md`):
+- `GpuVertex { position: [f32;3], normal: [f32;3] }` — canonical vertex type (locations 0, 1)
+- `PolyMesh` — intermediate n-gon mesh used during procedural generation
+- `RenderMesh` — GPU-ready triangulated mesh with smooth normals and `u32` indices
+- Pipeline: `SkinGraph → skin_modifier() → catmull_clark()×N → triangulate_smooth() → GPU`
+- Test scene: single vertex → skin (cube) → CC×2 → near-sphere (98 verts, 576 indices)
+- Index buffer uses `wgpu::IndexFormat::Uint32` (supports meshes beyond 65535 vertices)
 
 **Transformation Pipeline** (`RtsCamera`):
 - View matrix: `look_at_rh(eye, target, Y)` — eye computed from pitch/yaw/distance offset
@@ -162,9 +168,9 @@ The application follows a standard wgpu rendering pipeline:
 2. Is this a genuine architectural choice? If yes, consider a research doc in `docs/research/`
 3. After implementation, does CLAUDE.md need updating?
 
-**To change cube appearance:**
-- Modify `CUBE_VERTICES` array for different size (currently 0.1 unit half-extent)
-- Edit `CUBE_INDICES` for different topology
+**To change the procedural mesh:**
+- Edit `build_procedural_sphere()` in `main.rs` — change `add_node()` radius, or `subdivide()` level
+- To add edges: call `graph.add_edge(a, b)` after `add_node()` (edge tube generation is stubbed; implement in `skin.rs`)
 
 **To adjust camera behavior:**
 - Edit `RtsCamera::new()` defaults in `src/engine/camera.rs` (speed, FOV, pitch, bounds)

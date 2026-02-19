@@ -1,7 +1,7 @@
 # Next Steps - Immediate Action Plan
 
 **Last Updated:** 2026-02-18
-**Status:** Phase 1 - Weeks 1-3 Complete
+**Status:** Phase 2 - Procedural Modeling Pipeline Implemented
 
 ## Completed
 
@@ -18,6 +18,14 @@
 - Displays: FPS, frame time (avg/min/max), entity count, draw calls, resolution, camera info
 - Styled with semi-transparent black panel, small white monospace font
 - egui will also serve as the foundation for the future player HUD
+
+### Week 4: Procedural Modeling Pipeline
+- `src/engine/mesh.rs` — `PolyMesh`, `RenderMesh`, `GpuVertex`, `triangulate_smooth()` (area-weighted smooth normals)
+- `src/engine/skin.rs` — `SkinGraph` + skin modifier (isolated vertex → cube; edge tubes stubbed)
+- `src/engine/subdivide.rs` — Catmull-Clark subdivision (`catmull_clark()` + `subdivide()`)
+- Pipeline: single vertex → skin (cube) → CC×2 → near-sphere (98 verts, 576 indices)
+- Test scene: 8 static sphere-like entities with distinct colors, instanced rendering unchanged
+- Index buffer upgraded from u16 to u32 for future scalability
 
 ### Week 3: Camera & Input
 - `src/engine/input.rs` — `InputState` for keyboard/mouse/scroll tracking from winit events
@@ -53,5 +61,5 @@
 | Done | [lighting-implementation.md](./research/lighting-implementation.md) | Blinn-Phong lighting |
 | Done | [ui-system.md](./research/ui-system.md) | UI approach — egui chosen |
 | Done | camera-system.md | RTS camera math, ray casting |
-| TODO | procedural-modeling.md | Skin modifier, subdivision surfaces |
+| Done | [procedural-modeling.md](./research/procedural-modeling.md) | Skin modifier, Catmull-Clark subdivision |
 | TODO | pathfinding.md | A* vs flowfields, steering |
