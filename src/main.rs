@@ -13,7 +13,7 @@ use winit::{
 use glam::{Mat4, Vec3};
 use bevy_ecs::prelude::*;
 use engine::{Transform, Color as EntityColor, Velocity, GroupMembership, UnitAgent};
-use engine::{NavigationGrid, FlowField, compute_flowfield, GRID_WIDTH, GRID_HEIGHT};
+use engine::{NavigationGrid, FlowField, DensityMap, compute_flowfield, compute_flowfield_with_density, GRID_WIDTH, GRID_HEIGHT};
 use engine::{AgentSnapshot, SpatialGrid, compute_orca_velocity};
 use engine::camera::RtsCamera;
 use engine::debug_overlay::{DebugOverlay, DebugStats, UnitDebugDraw};
@@ -29,6 +29,20 @@ const UNIT_RADIUS: f32 = 0.5;
 const ARRIVAL_RADIUS: f32 = 1.5;
 /// ORCA look-ahead window (seconds).  1.5 s gives smooth anticipatory avoidance.
 const ORCA_TIME_HORIZON: f32 = 1.5;
+/// Boids cohesion: maximum fraction of max_speed contributed by the centroid pull.
+/// 0 = no cohesion (units scatter), 1 = centroid pull equals full max_speed.
+const BOIDS_COHESION: f32 = 0.35;
+/// Density surcharge weight added to each cell's flowfield cost per unit present.
+/// Controls how aggressively units spread across available corridor width.
+/// See pathfinding.md §"The Novel Part: Density Feedback Cost".
+const DENSITY_WEIGHT: f32 = 0.4;
+/// Rebuild the density map and recompute flowfields every this many frames.
+/// At 60 FPS this is ~133 ms — frequent enough to feel responsive,
+/// cheap enough to stay well within the 16 ms frame budget.
+const DENSITY_UPDATE_INTERVAL: u32 = 8;
+/// Distance (world units) at which cohesion reaches its maximum weight.
+/// Below this the pull scales linearly with distance from centroid.
+const BOIDS_COHESION_DIST: f32 = 6.0;
 
 // ============================================================================
 // INSTANCE DATA (per-entity, passed alongside the shared procedural mesh)
@@ -215,6 +229,8 @@ struct State {
     nav_grid: NavigationGrid,
     groups: Vec<UnitGroup>,
     spatial_grid: SpatialGrid,
+    density_map: DensityMap,
+    frame_count: u32,
 
     // Camera & Input
     camera: RtsCamera,
@@ -523,6 +539,8 @@ impl State {
             nav_grid,
             groups,
             spatial_grid,
+            density_map: DensityMap::new(GRID_WIDTH, GRID_HEIGHT),
+            frame_count: 0,
             camera: RtsCamera::new(),
             input: {
                 let mut input = InputState::new();
@@ -622,7 +640,25 @@ impl State {
             self.spatial_grid.insert(snap.pos, i);
         }
 
-        // ── 3. Desired velocity from flowfield ───────────────────────────────
+        // ── 3a. Boids cohesion — compute live group centroids ────────────────
+        // Only non-arrived units contribute so stragglers near the goal don't
+        // pull the whole group backward.
+        let num_groups = groups.len();
+        let mut centroid_sum   = vec![glam::Vec2::ZERO; num_groups];
+        let mut centroid_count = vec![0u32; num_groups];
+        for snap in &snapshots {
+            let gid = snap.group_id as usize;
+            if gid < num_groups && !snap.arrived {
+                centroid_sum[gid]   += snap.pos;
+                centroid_count[gid] += 1;
+            }
+        }
+        let group_centroids: Vec<glam::Vec2> = centroid_sum.iter()
+            .zip(centroid_count.iter())
+            .map(|(&sum, &n)| if n > 0 { sum / n as f32 } else { glam::Vec2::ZERO })
+            .collect();
+
+        // ── 3b. Desired velocity = flowfield + cohesion ──────────────────────
         let desired_vels: Vec<glam::Vec2> = snapshots.iter().map(|snap| {
             if snap.arrived { return glam::Vec2::ZERO; }
             let group = match groups.get(snap.group_id as usize) {
@@ -635,13 +671,31 @@ impl State {
                 .map(|cell| group.flow_field.sample_cell(cell))
                 .unwrap_or(glam::Vec2::ZERO);
 
-            if dir == glam::Vec2::ZERO {
-                // At goal or unreachable cell — steer directly toward goal.
+            let flowfield_vel = if dir == glam::Vec2::ZERO {
+                // At goal cell or unreachable — steer directly.
                 let goal = glam::Vec2::new(group.goal_world.x, group.goal_world.z);
                 (goal - snap.pos).normalize_or_zero() * snap.max_speed
             } else {
                 dir * snap.max_speed
-            }
+            };
+
+            // Cohesion: gentle pull toward live group centroid.
+            // Scales from 0 (at centroid) up to BOIDS_COHESION * max_speed
+            // (at BOIDS_COHESION_DIST or beyond).
+            let centroid = group_centroids
+                .get(snap.group_id as usize)
+                .copied()
+                .unwrap_or(snap.pos);
+            let to_center = centroid - snap.pos;
+            let dist = to_center.length();
+            let cohesion_vel = if dist > 0.1 {
+                let t = (dist / BOIDS_COHESION_DIST).min(1.0);
+                to_center / dist * snap.max_speed * t * BOIDS_COHESION
+            } else {
+                glam::Vec2::ZERO
+            };
+
+            (flowfield_vel + cohesion_vel).clamp_length_max(snap.max_speed)
         }).collect();
 
         // ── 4. ORCA ──────────────────────────────────────────────────────────
@@ -680,6 +734,34 @@ impl State {
             for (mut transform, velocity) in query.iter_mut(&mut self.world) {
                 transform.position += velocity.linear * dt;
                 transform.position.y = 0.5; // keep spheres on the ground plane
+            }
+        }
+
+        // ── 7. Density-feedback flowfield recomputation (every N frames) ─────
+        //
+        // Rebuild the density map from current unit positions, then recompute
+        // each group's flowfield with a density surcharge so units spread across
+        // the full corridor width instead of queuing in a single-file line.
+        //
+        // Runs on fresh post-integration positions so the surcharge reflects
+        // where units actually are after this frame's movement.
+        // See pathfinding.md §"Layer 2: Group Flowfield / The Novel Part".
+        self.frame_count += 1;
+        if self.frame_count % DENSITY_UPDATE_INTERVAL == 0 {
+            self.density_map.clear();
+            {
+                let mut q = self.world.query::<&Transform>();
+                for tf in q.iter(&self.world) {
+                    self.density_map.add_unit(tf.position);
+                }
+            }
+            for group in &mut self.groups {
+                group.flow_field = compute_flowfield_with_density(
+                    &self.nav_grid,
+                    group.goal_world,
+                    &self.density_map,
+                    DENSITY_WEIGHT,
+                );
             }
         }
     }
