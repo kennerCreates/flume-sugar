@@ -28,12 +28,12 @@ const UNIT_SPEED: f32 = 2.5;
 const UNIT_RADIUS: f32 = 0.5;
 /// Units within this world-space distance of their goal are considered arrived.
 const ARRIVAL_RADIUS: f32 = 1.5;
-/// ORCA look-ahead window (seconds).  1.5 s gives smooth anticipatory avoidance.
-const ORCA_TIME_HORIZON: f32 = 1.5;
+/// ORCA look-ahead window (seconds).  Shorter = more direct movement; longer = smoother lanes.
+const ORCA_TIME_HORIZON: f32 = 0.8;
 /// Density surcharge weight added to each cell's flowfield cost per unit present.
 /// Controls how aggressively units spread across available corridor width.
 /// See pathfinding.md §"The Novel Part: Density Feedback Cost".
-const DENSITY_WEIGHT: f32 = 0.4;
+const DENSITY_WEIGHT: f32 = 0.15;
 /// Rebuild the density map and recompute flowfields every this many frames.
 /// At 60 FPS this is ~133 ms — frequent enough to feel responsive,
 /// cheap enough to stay well within the 16 ms frame budget.
@@ -833,7 +833,12 @@ impl State {
                 dir * snap.max_speed
             };
 
-            // Slot pull: spring toward assigned slot (fallback: group centroid).
+            // Slot pull: spring toward assigned slot — lateral component only.
+            //
+            // Removing the forward/backward component ensures the pull never
+            // opposes a unit's progress toward the goal. It only corrects
+            // lateral drift so units spread across the formation width without
+            // slowing down or oscillating around their centroid.
             let slot_pull_vel = if let Some(formation) = formations.get(gid) {
                 let target = formation
                     .slot_positions
@@ -843,10 +848,13 @@ impl State {
                         group_centroids.get(gid).copied().unwrap_or(snap.pos)
                     });
                 let to_slot = target - snap.pos;
-                let slot_dist = to_slot.length();
+                // Project out the travel direction so only the lateral component remains.
+                let travel = formation.travel_dir;
+                let lateral = to_slot - travel * to_slot.dot(travel);
+                let slot_dist = lateral.length();
                 if slot_dist > 0.05 {
                     let t = (slot_dist / SLOT_PULL_DIST).min(1.0);
-                    to_slot / slot_dist * snap.max_speed * t * SLOT_PULL
+                    lateral / slot_dist * snap.max_speed * t * SLOT_PULL
                 } else {
                     glam::Vec2::ZERO
                 }
