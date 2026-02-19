@@ -99,6 +99,22 @@ impl LightUniform {
 // PROCEDURAL MESH PIPELINE
 // ============================================================================
 
+/// Build a flat ground plane quad covering the full map area.
+/// Vertices are at y=0 with an upward normal so they lit from above.
+fn build_ground_plane_mesh(half_x: f32, half_z: f32) -> engine::mesh::RenderMesh {
+    use engine::mesh::{GpuVertex, RenderMesh};
+    let n = [0.0_f32, 1.0, 0.0];
+    let vertices = vec![
+        GpuVertex { position: [-half_x, 0.0, -half_z], normal: n },
+        GpuVertex { position: [-half_x, 0.0,  half_z], normal: n },
+        GpuVertex { position: [ half_x, 0.0,  half_z], normal: n },
+        GpuVertex { position: [ half_x, 0.0, -half_z], normal: n },
+    ];
+    // CCW winding when viewed from above (+Y)
+    let indices = vec![0u32, 1, 2, 0, 2, 3];
+    RenderMesh { vertices, indices }
+}
+
 /// Build the test mesh: single vertex → Skin Modifier (cube) → Catmull-Clark ×2.
 /// Returns a GPU-ready RenderMesh with smooth normals (98 verts, 576 indices).
 fn build_procedural_sphere() -> engine::mesh::RenderMesh {
@@ -136,6 +152,12 @@ struct State {
     instance_buffer: wgpu::Buffer,
     num_indices: u32,
     max_instances: usize,
+
+    // Ground plane
+    ground_vertex_buffer: wgpu::Buffer,
+    ground_index_buffer: wgpu::Buffer,
+    ground_instance_buffer: wgpu::Buffer,
+    ground_num_indices: u32,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     light_bind_group: wgpu::BindGroup,
@@ -382,6 +404,30 @@ impl State {
             mapped_at_creation: false,
         });
 
+        // Ground plane buffers — oversized beyond camera bounds (±50) so edges are never visible
+        let ground_mesh = build_ground_plane_mesh(100.0, 100.0);
+        let ground_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Ground Vertex Buffer"),
+            contents: ground_mesh.vertex_bytes(),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let ground_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Ground Index Buffer"),
+            contents: ground_mesh.index_bytes(),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let ground_num_indices = ground_mesh.index_count() as u32;
+        let ground_instance = InstanceData {
+            position: [0.0, 0.0, 0.0],
+            _padding: 0.0,
+            color: [0.25, 0.45, 0.25, 1.0],  // dark green
+        };
+        let ground_instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Ground Instance Buffer"),
+            contents: bytemuck::cast_slice(&[ground_instance]),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         let (depth_texture, depth_view) = Self::create_depth_texture(&device, &config);
         let debug_overlay = DebugOverlay::new(&window, &device, config.format);
 
@@ -401,6 +447,10 @@ impl State {
             instance_buffer,
             num_indices,
             max_instances,
+            ground_vertex_buffer,
+            ground_index_buffer,
+            ground_instance_buffer,
+            ground_num_indices,
             uniform_buffer,
             uniform_bind_group,
             light_bind_group,
@@ -445,8 +495,8 @@ impl State {
 
         self.camera.update(&self.input, dt);
 
-        // Movement system
-        let bounds = Vec3::new(20.0, 10.0, 20.0);
+        // Movement system — bounds match camera (±50 on X/Z)
+        let bounds = Vec3::new(100.0, 10.0, 100.0);
         {
             let mut query = self.world.query::<(&mut Transform, &Velocity)>();
             for (mut transform, velocity) in query.iter_mut(&mut self.world) {
@@ -463,12 +513,11 @@ impl State {
             for (transform, mut velocity) in query.iter_mut(&mut self.world) {
                 let out_of_bounds =
                     transform.position.x > half_bounds.x || transform.position.x < -half_bounds.x
-                    || transform.position.z > half_bounds.z || transform.position.z < -half_bounds.z
-                    || transform.position.y < 0.0 || transform.position.y > bounds.y;
+                    || transform.position.z > half_bounds.z || transform.position.z < -half_bounds.z;
                 if out_of_bounds {
                     let target = Vec3::new(
                         rng.gen_range(-half_bounds.x..half_bounds.x),
-                        rng.gen_range(0.0..bounds.y),
+                        0.5,  // stay on ground plane
                         rng.gen_range(-half_bounds.z..half_bounds.z),
                     );
                     let direction = (target - transform.position).normalize();
@@ -542,9 +591,15 @@ impl State {
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_bind_group(1, &self.light_bind_group, &[]);
+            // Draw ground plane (1 instance at origin)
+            render_pass.set_vertex_buffer(0, self.ground_vertex_buffer.slice(..));
+            render_pass.set_vertex_buffer(1, self.ground_instance_buffer.slice(..));
+            render_pass.set_index_buffer(self.ground_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..self.ground_num_indices, 0, 0..1);
+
+            // Draw spheres (instanced)
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-            // u32 indices — needed for procedural meshes that can exceed 65535 vertices
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.draw_indexed(0..self.num_indices, 0, 0..instance_count as u32);
         }
@@ -604,18 +659,18 @@ impl State {
 fn spawn_test_entities(world: &mut World, count: usize) {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    let bounds = Vec3::new(20.0, 10.0, 20.0);
+    let bounds = Vec3::new(100.0, 10.0, 100.0);
 
     for _ in 0..count {
         let position = Vec3::new(
             rng.gen_range(-bounds.x / 2.0..bounds.x / 2.0),
-            rng.gen_range(0.0..bounds.y),
+            0.5,  // sphere radius = 0.5, rests on ground at y=0
             rng.gen_range(-bounds.z / 2.0..bounds.z / 2.0),
         );
         let velocity = Velocity {
             linear: Vec3::new(
                 rng.gen_range(-2.0..2.0),
-                rng.gen_range(-1.0..1.0),
+                0.0,  // no vertical movement — spheres roll on the ground plane
                 rng.gen_range(-2.0..2.0),
             ),
         };
