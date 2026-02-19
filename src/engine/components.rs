@@ -44,3 +44,14 @@ pub struct Velocity {
 pub struct GroupMembership {
     pub group_id: u32,
 }
+
+/// Physical properties needed by the ORCA local-avoidance system (Sprint 2).
+///
+/// `radius`    — collision radius in world units.  Our procedural sphere mesh
+///               has a diameter of 1.0, so 0.5 is the correct value.
+/// `max_speed` — maximum speed in world units/sec (matches UNIT_SPEED).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct UnitAgent {
+    pub radius:    f32,
+    pub max_speed: f32,
+}

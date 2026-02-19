@@ -12,8 +12,9 @@ use winit::{
 };
 use glam::{Mat4, Vec3};
 use bevy_ecs::prelude::*;
-use engine::{Transform, Color as EntityColor, Velocity, GroupMembership};
+use engine::{Transform, Color as EntityColor, Velocity, GroupMembership, UnitAgent};
 use engine::{NavigationGrid, FlowField, compute_flowfield, GRID_WIDTH, GRID_HEIGHT};
+use engine::{AgentSnapshot, SpatialGrid, compute_orca_velocity};
 use engine::camera::RtsCamera;
 use engine::debug_overlay::{DebugOverlay, DebugStats};
 use engine::input::InputState;
@@ -21,8 +22,12 @@ use engine::mesh::GpuVertex;
 
 /// Movement speed for all units (world units per second).
 const UNIT_SPEED: f32 = 5.0;
+/// Physical collision radius of each unit (matches the procedural sphere mesh).
+const UNIT_RADIUS: f32 = 0.5;
 /// Units within this world-space distance of their goal are considered arrived.
 const ARRIVAL_RADIUS: f32 = 1.5;
+/// ORCA look-ahead window (seconds).  1.5 s gives smooth anticipatory avoidance.
+const ORCA_TIME_HORIZON: f32 = 1.5;
 
 // ============================================================================
 // INSTANCE DATA (per-entity, passed alongside the shared procedural mesh)
@@ -214,6 +219,7 @@ struct State {
     // Pathfinding
     nav_grid: NavigationGrid,
     groups: Vec<UnitGroup>,
+    spatial_grid: SpatialGrid,
 
     // Camera & Input
     camera: RtsCamera,
@@ -443,7 +449,7 @@ impl State {
         let num_indices = render_mesh.index_count() as u32;
 
         // Instance buffer for per-entity position+color (shared across all entities)
-        let max_instances = 2000;
+        let max_instances = 600;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Instance Buffer"),
             size: (max_instances * std::mem::size_of::<InstanceData>()) as u64,
@@ -482,6 +488,14 @@ impl State {
         let nav_grid = NavigationGrid::new_open(GRID_WIDTH, GRID_HEIGHT);
         let groups = create_crossing_groups(&nav_grid);
 
+        // Spatial grid for ORCA neighbour queries — 2-unit cells over the full map.
+        use engine::navigation::WORLD_HALF;
+        let spatial_grid = SpatialGrid::new(
+            glam::Vec2::new(-WORLD_HALF, -WORLD_HALF),
+            glam::Vec2::new( WORLD_HALF,  WORLD_HALF),
+            2.0,
+        );
+
         // ECS world — 2000 units in 8 crossing groups.
         let mut world = World::new();
         spawn_crossing_scene(&mut world, &groups);
@@ -511,6 +525,7 @@ impl State {
             last_update: std::time::Instant::now(),
             nav_grid,
             groups,
+            spatial_grid,
             camera: RtsCamera::new(),
             input: {
                 let mut input = InputState::new();
@@ -548,45 +563,117 @@ impl State {
 
         self.camera.update(&self.input, dt);
 
-        // ── Flowfield movement ──────────────────────────────────────────────
-        // Pass 1 (read-only): sample each unit's flowfield and compute the
-        // velocity it should have this frame.
+        // ── Pathfinding + ORCA local avoidance ─────────────────────────────
+        //
+        // System order (matches pathfinding.md §"System Execution Order"):
+        //   1. Collect unit snapshots from ECS  (read-only world access)
+        //   2. Rebuild spatial grid
+        //   3. Sample flowfield → desired_vel per unit
+        //   4. ORCA → steering_vel per unit
+        //   5. Write steering_vel back to Velocity  (write world access)
+        //   6. Integrate positions
+
+        // ── 1. Collect snapshots ─────────────────────────────────────────────
         let nav_grid = &self.nav_grid;
         let groups   = &self.groups;
-        let move_commands: Vec<(bevy_ecs::entity::Entity, Vec3)> = {
-            let mut query = self.world.query::<(bevy_ecs::entity::Entity, &Transform, &GroupMembership)>();
-            query.iter(&self.world).filter_map(|(entity, transform, membership)| {
-                let group = groups.get(membership.group_id as usize)?;
 
-                // Arrival check: stop within ARRIVAL_RADIUS of the goal.
-                let to_goal = group.goal_world - transform.position;
-                let dist_xz = (to_goal.x * to_goal.x + to_goal.z * to_goal.z).sqrt();
-                if dist_xz < ARRIVAL_RADIUS {
-                    return Some((entity, Vec3::ZERO));
+        struct UnitSnap {
+            entity:   bevy_ecs::entity::Entity,
+            pos:      glam::Vec2,   // XZ
+            vel:      glam::Vec2,   // XZ velocity from last frame
+            radius:   f32,
+            max_speed: f32,
+            group_id: u32,
+            arrived:  bool,
+        }
+
+        let snapshots: Vec<UnitSnap> = {
+            let mut q = self.world.query::<(
+                bevy_ecs::entity::Entity,
+                &Transform,
+                &Velocity,
+                &UnitAgent,
+                &GroupMembership,
+            )>();
+            q.iter(&self.world).map(|(entity, tf, vel, agent, gm)| {
+                let p = tf.position;
+                let v = vel.linear;
+                let arrived = groups.get(gm.group_id as usize).map(|g| {
+                    let dx = g.goal_world.x - p.x;
+                    let dz = g.goal_world.z - p.z;
+                    (dx * dx + dz * dz).sqrt() < ARRIVAL_RADIUS
+                }).unwrap_or(false);
+                UnitSnap {
+                    entity,
+                    pos:       glam::Vec2::new(p.x, p.z),
+                    vel:       glam::Vec2::new(v.x, v.z),
+                    radius:    agent.radius,
+                    max_speed: agent.max_speed,
+                    group_id:  gm.group_id,
+                    arrived,
                 }
-
-                // Sample the flowfield at the unit's current cell.
-                let cell = nav_grid.world_to_cell(transform.position)?;
-                let dir  = group.flow_field.sample_cell(cell);
-
-                if dir == glam::Vec2::ZERO {
-                    // Cell is at goal or unreachable — steer directly.
-                    let d = glam::Vec2::new(to_goal.x, to_goal.z).normalize_or_zero();
-                    return Some((entity, Vec3::new(d.x * UNIT_SPEED, 0.0, d.y * UNIT_SPEED)));
-                }
-
-                Some((entity, Vec3::new(dir.x * UNIT_SPEED, 0.0, dir.y * UNIT_SPEED)))
             }).collect()
         };
 
-        // Pass 2 (write): apply the computed velocities.
-        for (entity, vel) in move_commands {
-            if let Some(mut velocity) = self.world.get_mut::<Velocity>(entity) {
-                velocity.linear = vel;
+        // ── 2. Rebuild spatial grid ──────────────────────────────────────────
+        self.spatial_grid.clear();
+        for (i, snap) in snapshots.iter().enumerate() {
+            self.spatial_grid.insert(snap.pos, i);
+        }
+
+        // ── 3. Desired velocity from flowfield ───────────────────────────────
+        let desired_vels: Vec<glam::Vec2> = snapshots.iter().map(|snap| {
+            if snap.arrived { return glam::Vec2::ZERO; }
+            let group = match groups.get(snap.group_id as usize) {
+                Some(g) => g,
+                None    => return glam::Vec2::ZERO,
+            };
+            let pos3 = Vec3::new(snap.pos.x, 0.5, snap.pos.y);
+            let dir  = nav_grid
+                .world_to_cell(pos3)
+                .map(|cell| group.flow_field.sample_cell(cell))
+                .unwrap_or(glam::Vec2::ZERO);
+
+            if dir == glam::Vec2::ZERO {
+                // At goal or unreachable cell — steer directly toward goal.
+                let goal = glam::Vec2::new(group.goal_world.x, group.goal_world.z);
+                (goal - snap.pos).normalize_or_zero() * snap.max_speed
+            } else {
+                dir * snap.max_speed
+            }
+        }).collect();
+
+        // ── 4. ORCA ──────────────────────────────────────────────────────────
+        let agent_snaps: Vec<AgentSnapshot> = snapshots.iter()
+            .zip(desired_vels.iter())
+            .map(|(snap, &dv)| AgentSnapshot {
+                pos:         snap.pos,
+                vel:         snap.vel,
+                desired_vel: dv,
+                radius:      snap.radius,
+                max_speed:   snap.max_speed,
+            })
+            .collect();
+
+        let inv_dt = if dt > 1e-4 { 1.0 / dt } else { 1000.0 };
+
+        let steering_vels: Vec<Vec3> = (0..agent_snaps.len()).map(|i| {
+            if snapshots[i].arrived { return Vec3::ZERO; }
+            let v2 = compute_orca_velocity(
+                &agent_snaps, i, &self.spatial_grid,
+                ORCA_TIME_HORIZON, inv_dt,
+            );
+            Vec3::new(v2.x, 0.0, v2.y)
+        }).collect();
+
+        // ── 5. Write velocities ──────────────────────────────────────────────
+        for (snap, &sv) in snapshots.iter().zip(steering_vels.iter()) {
+            if let Some(mut velocity) = self.world.get_mut::<Velocity>(snap.entity) {
+                velocity.linear = sv;
             }
         }
 
-        // ── Integrate positions ─────────────────────────────────────────────
+        // ── 6. Integrate positions ───────────────────────────────────────────
         {
             let mut query = self.world.query::<(&mut Transform, &Velocity)>();
             for (mut transform, velocity) in query.iter_mut(&mut self.world) {
@@ -728,8 +815,8 @@ impl State {
 ///
 /// Layout: 25 wide (⟂ to travel) × 10 deep (∥ to travel) = 250 exactly.
 fn spawn_crossing_scene(world: &mut World, groups: &[UnitGroup]) {
-    const FORM_WIDE: u32 = 25; // units perpendicular to travel direction
-    const FORM_DEEP: u32 = 10; // units along travel direction
+    const FORM_WIDE: u32 = 15; // units perpendicular to travel direction
+    const FORM_DEEP: u32 = 5;  // units along travel direction
     const SPACING: f32 = 0.85; // world units between unit centres
 
     let half_w = FORM_WIDE as f32 * SPACING * 0.5;
@@ -769,6 +856,7 @@ fn spawn_crossing_scene(world: &mut World, groups: &[UnitGroup]) {
                     Velocity { linear: Vec3::ZERO },
                     EntityColor { r: group.color[0], g: group.color[1], b: group.color[2] },
                     GroupMembership { group_id: group.id },
+                    UnitAgent { radius: UNIT_RADIUS, max_speed: UNIT_SPEED },
                 ));
                 total += 1;
             }
