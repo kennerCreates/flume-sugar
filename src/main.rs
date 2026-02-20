@@ -28,11 +28,11 @@ const UNIT_RADIUS: f32 = 0.5;
 /// Units within this world-space distance of their goal are considered arrived.
 const ARRIVAL_RADIUS: f32 = 1.5;
 /// ORCA look-ahead window (seconds).  Shorter = more direct movement; longer = smoother lanes.
-/// At UNIT_SPEED 2.5 the two groups close at ~5 u/s. A horizon of 0.8 s gives only
-/// 2 units of warning — smaller than a single formation row — so ORCA fires when
-/// units are already touching, making the LP infeasible and stalling the whole front.
-/// 2.5 s gives ~12 units of warning, letting avoidance begin before contact.
-const ORCA_TIME_HORIZON: f32 = 2.5;
+/// At UNIT_SPEED 2.5 the two groups close at ~5 u/s. 1.5 s gives a ~4.75-unit
+/// constraint radius — constraints fire roughly 1 second before contact. Long
+/// enough for smooth avoidance; short enough that units still-distant on the
+/// horizon don't accumulate 20 stacked constraints and freeze via lp3.
+const ORCA_TIME_HORIZON: f32 = 1.5;
 
 // ── Sprint 4: Formation + Arrival ──────────────────────────────────────────
 
@@ -197,6 +197,10 @@ struct UnitGroup {
     /// Each unit in the group steers toward `path[path_idx] + formation_offset`
     /// so every unit targets its own formation slot at each waypoint.
     path: Vec<glam::Vec2>,
+    /// Order in which this group's move command was issued (0 = issued first).
+    /// Copied onto every unit as its ORCA priority: lower value = higher rank =
+    /// holds course (30% responsibility). Groups commanded later yield (70%).
+    command_order: u32,
 }
 
 /// Per-group formation state: arrival tracking and travel direction.
@@ -225,18 +229,23 @@ impl GroupFormation {
 }
 
 /// Build 2 head-on groups and compute their flowfields.
+///
+/// command_order encodes which group's move order was issued first.
+/// 0 = commanded first → highest ORCA priority (holds course, 30% responsibility).
+/// 1 = commanded second → yields, parts to make way (70% responsibility).
+/// Red is commanded first so Blue visibly parts around it.
 fn create_crossing_groups(nav_grid: &NavigationGrid) -> Vec<UnitGroup> {
-    // (start_xz, goal_xz, rgb)
-    let defs: &[([f32; 2], [f32; 2], [f32; 3])] = &[
-        ([-35.0, -35.0], [ 35.0,  35.0], [1.00, 0.20, 0.20]), // NW → SE  Red
-        ([ 35.0,  35.0], [-35.0, -35.0], [0.20, 0.50, 1.00]), // SE → NW  Blue
+    // (start_xz, goal_xz, rgb, command_order)
+    let defs: &[([f32; 2], [f32; 2], [f32; 3], u32)] = &[
+        ([-35.0, -35.0], [ 35.0,  35.0], [1.00, 0.20, 0.20], 0), // NW→SE  Red   — commanded first
+        ([ 35.0,  35.0], [-35.0, -35.0], [0.20, 0.50, 1.00], 1), // SE→NW  Blue  — commanded second
     ];
 
-    defs.iter().enumerate().map(|(i, (start_xz, goal_xz, color))| {
+    defs.iter().enumerate().map(|(i, (start_xz, goal_xz, color, command_order))| {
         let start_world = glam::Vec3::new(start_xz[0], 0.5, start_xz[1]);
         let goal_world  = glam::Vec3::new(goal_xz[0],  0.0, goal_xz[1]);
         let path        = compute_astar(nav_grid, start_world, goal_world);
-        UnitGroup { id: i as u32, color: *color, start_world, goal_world, path }
+        UnitGroup { id: i as u32, color: *color, start_world, goal_world, path, command_order: *command_order }
     }).collect()
 }
 
@@ -1170,18 +1179,10 @@ fn spawn_crossing_scene(world: &mut World, groups: &[UnitGroup]) {
                     spawn_z - centroid_z,
                 );
 
-                // Priority is the group id, not the column within the group.
-                //
-                // The old column-based scheme (w % 2) distributed priorities
-                // identically across both groups, so every inter-group encounter
-                // had a random mix of 50/50 and 20/80 responsibility — no consistent
-                // "group 1 yields" signal and no stable passing lane.
-                //
-                // Using group.id means all group-0 units hold course (20% ORCA
-                // responsibility) and all group-1 units step aside (80%).  This
-                // gives ORCA a coherent bias: group-1 units consistently deflect
-                // the same way, opening a lane for group-0 to pass through.
-                let priority = group.id;
+                // Priority = command_order: the group whose move order was issued
+                // first holds course (30% ORCA responsibility); groups issued later
+                // yield and part to make way (70% responsibility).
+                let priority = group.command_order;
                 world.spawn((
                     Transform::from_position(Vec3::new(spawn_x, 0.5, spawn_z)),
                     Velocity { linear: Vec3::ZERO },

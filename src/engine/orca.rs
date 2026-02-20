@@ -411,13 +411,19 @@ pub fn compute_orca_velocity(
         let b = &agents[*b_idx];
 
         // Priority-based responsibility.
-        // Lower priority value = higher rank = holds course (takes less responsibility).
+        // Lower priority value = higher rank (issued command first) = holds course.
+        //
+        // 20%/80% was too aggressive: with 20 opponents each pushing 80% of the
+        // correction onto the yielding unit, lp3 found near-zero as the least-bad
+        // velocity and the whole yielding group froze. 30%/70% keeps a strong,
+        // asymmetric bias — the yielding group visibly parts — without the LP
+        // becoming infeasible from piled-up constraints.
         let respons_a = if a.priority == b.priority {
             0.5   // standard symmetric ORCA
         } else if a.priority < b.priority {
-            0.2   // a outranks b — a holds course, b will take the larger share
+            0.3   // a outranks b — a holds course, b takes the larger share
         } else {
-            0.8   // b outranks a — a steps aside
+            0.7   // b outranks a — a steps aside
         };
 
         // Predictive: assume neighbour will follow its desired velocity.
