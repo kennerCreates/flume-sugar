@@ -54,6 +54,9 @@ pub struct GroupMembership {
 pub struct UnitAgent {
     pub radius:    f32,
     pub max_speed: f32,
+    /// ORCA priority used to break head-on symmetry.
+    /// Even formation columns = 0 (hold course), odd = 1 (step aside).
+    pub priority:  u32,
 }
 
 /// Fixed XZ offset from the group centroid assigned at spawn time.

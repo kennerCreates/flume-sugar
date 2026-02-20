@@ -649,6 +649,7 @@ impl State {
             radius:           f32,
             max_speed:        f32,
             group_id:         u32,
+            priority:         u32,
             arrived:          bool,
             formation_offset: glam::Vec2,  // fixed spawn-time offset from group centroid
         }
@@ -679,6 +680,7 @@ impl State {
                     radius:           agent.radius,
                     max_speed:        agent.max_speed,
                     group_id:         gm.group_id,
+                    priority:         agent.priority,
                     arrived,
                     formation_offset: fo.offset,
                 }
@@ -911,6 +913,7 @@ impl State {
                 radius:      snap.radius,
                 max_speed:   ems,   // boosted for laggers so ORCA doesn't clamp the sprint
                 group_id:    snap.group_id,
+                priority:    snap.priority,
             })
             .collect();
 
@@ -1163,12 +1166,17 @@ fn spawn_crossing_scene(world: &mut World, groups: &[UnitGroup]) {
                     spawn_z - centroid_z,
                 );
 
+                // Alternating priority by formation column: even columns hold course
+                // (priority 0), odd columns step aside (priority 1).  When two units
+                // of different priority meet, the higher-rank unit (lower value) takes
+                // only 20% ORCA responsibility; the lower-rank unit takes 80%.
+                let priority = (w % 2) as u32;
                 world.spawn((
                     Transform::from_position(Vec3::new(spawn_x, 0.5, spawn_z)),
                     Velocity { linear: Vec3::ZERO },
                     EntityColor { r: group.color[0], g: group.color[1], b: group.color[2] },
                     GroupMembership { group_id: group.id },
-                    UnitAgent { radius: UNIT_RADIUS, max_speed: UNIT_SPEED },
+                    UnitAgent { radius: UNIT_RADIUS, max_speed: UNIT_SPEED, priority },
                     FormationOffset { offset: formation_offset },
                 ));
                 total += 1;

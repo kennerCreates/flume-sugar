@@ -11,6 +11,9 @@
 use glam::Vec2;
 
 const EPSILON: f32 = 1e-5;
+/// Maximum number of inter-group neighbours considered per agent per frame.
+/// Capping this prevents the LP from becoming infeasible in dense crossings.
+const MAX_ORCA_NEIGHBORS: usize = 10;
 
 // ============================================================================
 // SPATIAL GRID
@@ -114,6 +117,11 @@ pub struct AgentSnapshot {
     /// in *different* groups — same-group units move in formation and do
     /// not need to mutually avoid each other.
     pub group_id: u32,
+    /// ORCA priority.  Lower value = higher rank = holds course.
+    /// When two agents differ in priority, the higher-priority agent takes
+    /// less responsibility (0.2) and the lower-priority agent takes more (0.8).
+    /// Equal-priority agents split responsibility 50/50 as standard ORCA.
+    pub priority: u32,
 }
 
 // ============================================================================
@@ -146,6 +154,7 @@ fn orca_halfplane(
     pos_b: Vec2, vel_b: Vec2, r_b: f32,
     time_horizon: f32,
     inv_dt:       f32,
+    respons_a:    f32,  // fraction of the required velocity change A must take
 ) -> OrcaLine {
     let rel_pos = pos_b - pos_a;
     let rel_vel = vel_a - vel_b;
@@ -202,9 +211,8 @@ fn orca_halfplane(
         u = (combined_r * inv_dt - w_len) * unit_w;
     }
 
-    // Agent A takes half responsibility for the required velocity change.
     OrcaLine {
-        point: vel_a + 0.5 * u,
+        point: vel_a + respons_a * u,
         dir:   line_dir,
     }
 }
@@ -373,24 +381,50 @@ pub fn compute_orca_velocity(
     candidates.sort_unstable();
     candidates.dedup();
 
-    let mut constraints: Vec<OrcaLine> = Vec::with_capacity(candidates.len());
-    for &b_idx in &candidates {
-        if b_idx == a_idx { continue; }
-        let b = &agents[b_idx];
-        // Same-group units move in formation — skip mutual avoidance so they
-        // don't push each other off their formation slots.
-        if b.group_id == a.group_id { continue; }
+    // Filter to inter-group neighbours within reach and sort by distance
+    // so the neighbour cap keeps the most pressing collisions.
+    let reach_sq_base = {
+        let reach = a.radius + a.max_speed * time_horizon;
+        reach * reach
+    };
+    let mut inter_group: Vec<(f32, usize)> = candidates
+        .iter()
+        .filter_map(|&b_idx| {
+            if b_idx == a_idx { return None; }
+            let b = &agents[b_idx];
+            if b.group_id == a.group_id { return None; }
+            let reach = a.radius + b.radius + a.max_speed * time_horizon;
+            let dist_sq = (b.pos - a.pos).length_squared();
+            if dist_sq > reach * reach { return None; }
+            Some((dist_sq, b_idx))
+        })
+        .collect();
+    inter_group.sort_unstable_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+    inter_group.truncate(MAX_ORCA_NEIGHBORS);
 
-        // Fine distance filter (grid gives a superset).
-        let reach = a.radius + b.radius + a.max_speed * time_horizon;
-        if (b.pos - a.pos).length_squared() > reach * reach { continue; }
+    let _ = reach_sq_base; // suppress unused warning
 
-        // Predictive: assume neighbour will follow its flowfield direction.
+    let mut constraints: Vec<OrcaLine> = Vec::with_capacity(inter_group.len());
+    for (_, b_idx) in &inter_group {
+        let b = &agents[*b_idx];
+
+        // Priority-based responsibility.
+        // Lower priority value = higher rank = holds course (takes less responsibility).
+        let respons_a = if a.priority == b.priority {
+            0.5   // standard symmetric ORCA
+        } else if a.priority < b.priority {
+            0.2   // a outranks b — a holds course, b will take the larger share
+        } else {
+            0.8   // b outranks a — a steps aside
+        };
+
+        // Predictive: assume neighbour will follow its desired velocity.
         constraints.push(orca_halfplane(
             a.pos, a.vel,         a.radius,
             b.pos, b.desired_vel, b.radius,
             time_horizon,
             inv_dt,
+            respons_a,
         ));
     }
 
