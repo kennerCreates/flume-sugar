@@ -484,13 +484,18 @@ pub fn compute_astar(nav: &NavigationGrid, start: Vec3, goal: Vec3) -> Vec<Vec2>
     raw.reverse();
 
     // Convert to cells, then string-pull to remove redundant waypoints.
-    let cells: Vec<UVec2> = raw.iter()
-        .map(|&i| UVec2::new((i % w) as u32, (i / w) as u32))
-        .collect();
+    // Prepend start_cell so the LOS sweep begins from the actual start position;
+    // on an open map this collapses the entire path to [start_cell, goal_cell].
+    // The start entry is then dropped from the output (the group is already there).
+    let mut cells: Vec<UVec2> = Vec::with_capacity(raw.len() + 1);
+    cells.push(start_cell);
+    cells.extend(raw.iter().map(|&i| UVec2::new((i % w) as u32, (i / w) as u32)));
     let simplified = string_pull(nav, &cells);
 
-    // Convert simplified cells to world-space XZ positions.
-    let mut result: Vec<Vec2> = simplified.iter().map(|&c| {
+    // Drop the leading start_cell from the simplified output — units are already
+    // past it — then convert remaining cells to world-space XZ positions.
+    let waypoint_cells = if simplified.len() > 1 { &simplified[1..] } else { &simplified[..] };
+    let mut result: Vec<Vec2> = waypoint_cells.iter().map(|&c| {
         let world = nav.cell_center(c);
         Vec2::new(world.x, world.z)
     }).collect();
