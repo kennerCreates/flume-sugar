@@ -384,3 +384,172 @@ fn all_neighbors(pos: UVec2, w: u32, h: u32) -> impl Iterator<Item = UVec2> {
     })
     .map(move |(dx, dz)| UVec2::new((x + dx) as u32, (z + dz) as u32))
 }
+
+// ============================================================================
+// A* PATHFINDING  (one call per group order)
+// ============================================================================
+
+/// Compute a path from `start` to `goal` using A* on the navigation grid.
+///
+/// Returns a **simplified** list of world-space XZ waypoints (not including
+/// the start position).  String-pulling removes intermediate collinear points
+/// so the result is typically just `[goal.xz]` on an open map, growing only
+/// when the path must bend around obstacles.
+///
+/// This is called once per group when a move order is issued.  Individual
+/// units then steer toward `waypoint + formation_offset`, keeping them in
+/// formation all the way to the destination.
+pub fn compute_astar(nav: &NavigationGrid, start: Vec3, goal: Vec3) -> Vec<Vec2> {
+    let start_cell = nav.world_to_cell_clamped(start);
+    let goal_cell  = nav.world_to_cell_clamped(goal);
+
+    // Trivial case — already at the destination cell.
+    if start_cell == goal_cell {
+        return vec![Vec2::new(goal.x, goal.z)];
+    }
+
+    let w = nav.width  as usize;
+    let h = nav.height as usize;
+    let n = w * h;
+
+    let flat = |c: UVec2| c.y as usize * w + c.x as usize;
+
+    let mut g_score:   Vec<f32>  = vec![f32::MAX; n];
+    let mut came_from: Vec<u32>  = vec![u32::MAX; n];
+    let mut closed:    Vec<bool> = vec![false; n];
+
+    let start_idx = flat(start_cell);
+    let goal_idx  = flat(goal_cell);
+
+    g_score[start_idx] = 0.0;
+    // Open set encoded as Reverse<(f_bits, cell_idx)> so the cheapest entry
+    // is popped first.  Non-negative f32 bit patterns sort like their float
+    // values when interpreted as u32 (IEEE 754 property), so no wrapper needed.
+    let mut open: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
+    open.push(Reverse((astar_heuristic(start_cell, goal_cell).to_bits(), start_idx as u32)));
+
+    // 8-directional moves: (dx, dz, cost)
+    const DIRS: [(i32, i32, f32); 8] = [
+        ( 1,  0, 1.0),
+        (-1,  0, 1.0),
+        ( 0,  1, 1.0),
+        ( 0, -1, 1.0),
+        ( 1,  1, std::f32::consts::SQRT_2),
+        (-1,  1, std::f32::consts::SQRT_2),
+        ( 1, -1, std::f32::consts::SQRT_2),
+        (-1, -1, std::f32::consts::SQRT_2),
+    ];
+
+    'search: while let Some(Reverse((_, cur_u32))) = open.pop() {
+        let cur = cur_u32 as usize;
+        if closed[cur] { continue; }
+        closed[cur] = true;
+
+        if cur == goal_idx { break 'search; }
+
+        let cx = (cur % w) as i32;
+        let cy = (cur / w) as i32;
+        let cur_g = g_score[cur];
+
+        for &(dx, dy, cost) in &DIRS {
+            let nx = cx + dx;
+            let ny = cy + dy;
+            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 { continue; }
+            let nb      = UVec2::new(nx as u32, ny as u32);
+            let nb_idx  = flat(nb);
+            if closed[nb_idx] || !nav.walkable[nb_idx] { continue; }
+            let new_g = cur_g + cost;
+            if new_g < g_score[nb_idx] {
+                g_score[nb_idx]   = new_g;
+                came_from[nb_idx] = cur as u32;
+                let f = new_g + astar_heuristic(nb, goal_cell);
+                open.push(Reverse((f.to_bits(), nb_idx as u32)));
+            }
+        }
+    }
+
+    // Reconstruct raw cell path (goal → start direction, then reversed).
+    if came_from[goal_idx] == u32::MAX {
+        // No path found — return a direct line to goal as best effort.
+        return vec![Vec2::new(goal.x, goal.z)];
+    }
+    let mut raw: Vec<usize> = Vec::new();
+    let mut cur = goal_idx;
+    loop {
+        raw.push(cur);
+        let prev = came_from[cur];
+        if prev as usize == start_idx || prev == u32::MAX { break; }
+        cur = prev as usize;
+    }
+    raw.reverse();
+
+    // Convert to cells, then string-pull to remove redundant waypoints.
+    let cells: Vec<UVec2> = raw.iter()
+        .map(|&i| UVec2::new((i % w) as u32, (i / w) as u32))
+        .collect();
+    let simplified = string_pull(nav, &cells);
+
+    // Convert simplified cells to world-space XZ positions.
+    let mut result: Vec<Vec2> = simplified.iter().map(|&c| {
+        let world = nav.cell_center(c);
+        Vec2::new(world.x, world.z)
+    }).collect();
+
+    // Replace the last waypoint with the exact goal position (cell centres
+    // may be up to half a cell off the requested world coordinate).
+    let goal_xz = Vec2::new(goal.x, goal.z);
+    match result.last_mut() {
+        Some(last) => *last = goal_xz,
+        None       => result.push(goal_xz),
+    }
+
+    result
+}
+
+/// Octile distance — admissible heuristic for 8-directional grid movement.
+fn astar_heuristic(a: UVec2, b: UVec2) -> f32 {
+    let dx = (a.x as i32 - b.x as i32).unsigned_abs() as f32;
+    let dy = (a.y as i32 - b.y as i32).unsigned_abs() as f32;
+    let (mn, mx) = if dx < dy { (dx, dy) } else { (dy, dx) };
+    std::f32::consts::SQRT_2 * mn + (mx - mn)
+}
+
+/// Remove collinear waypoints: greedily skip to the farthest cell reachable
+/// from the current anchor with unobstructed line-of-sight.
+fn string_pull(nav: &NavigationGrid, cells: &[UVec2]) -> Vec<UVec2> {
+    if cells.len() <= 2 { return cells.to_vec(); }
+    let mut out    = vec![cells[0]];
+    let mut anchor = 0usize;
+    while anchor < cells.len() - 1 {
+        let mut reach = anchor + 1;
+        for j in (anchor + 2)..cells.len() {
+            if has_los(nav, cells[anchor], cells[j]) {
+                reach = j;
+            }
+        }
+        out.push(cells[reach]);
+        anchor = reach;
+    }
+    out
+}
+
+/// Bresenham line-of-sight: true if every cell between `a` and `b` is walkable.
+fn has_los(nav: &NavigationGrid, a: UVec2, b: UVec2) -> bool {
+    let mut x0 = a.x as i32;
+    let mut y0 = a.y as i32;
+    let x1 = b.x as i32;
+    let y1 = b.y as i32;
+    let dx =  (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1i32 } else { -1 };
+    let sy = if y0 < y1 { 1i32 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        if !nav.walkable[(y0 as u32 * nav.width + x0 as u32) as usize] { return false; }
+        if x0 == x1 && y0 == y1 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy { err += dy; x0 += sx; }
+        if e2 <= dx { err += dx; y0 += sy; }
+    }
+    true
+}

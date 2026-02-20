@@ -10,13 +10,13 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
-use glam::{Mat4, Vec3, UVec2};
+use glam::{Mat4, Vec3};
 use bevy_ecs::prelude::*;
 use engine::{Transform, Color as EntityColor, Velocity, GroupMembership, UnitAgent, FormationOffset};
-use engine::{NavigationGrid, FlowField, DensityMap, compute_flowfield, compute_flowfield_with_density, GRID_WIDTH, GRID_HEIGHT};
+use engine::{NavigationGrid, compute_astar, GRID_WIDTH, GRID_HEIGHT};
 use engine::{AgentSnapshot, SpatialGrid, compute_orca_velocity};
 use engine::camera::RtsCamera;
-use engine::debug_overlay::{DebugOverlay, DebugStats, UnitDebugDraw, FlowfieldArrowDraw, DensityCell};
+use engine::debug_overlay::{DebugOverlay, DebugStats, UnitDebugDraw};
 use engine::input::InputState;
 use engine::mesh::GpuVertex;
 use egui;
@@ -29,14 +29,6 @@ const UNIT_RADIUS: f32 = 0.5;
 const ARRIVAL_RADIUS: f32 = 1.5;
 /// ORCA look-ahead window (seconds).  Shorter = more direct movement; longer = smoother lanes.
 const ORCA_TIME_HORIZON: f32 = 0.8;
-/// Density surcharge weight added to each cell's flowfield cost per unit present.
-/// Controls how aggressively units spread across available corridor width.
-/// See pathfinding.md §"The Novel Part: Density Feedback Cost".
-const DENSITY_WEIGHT: f32 = 0.15;
-/// Rebuild the density map and recompute flowfields every this many frames.
-/// At 60 FPS this is ~133 ms — frequent enough to feel responsive,
-/// cheap enough to stay well within the 16 ms frame budget.
-const DENSITY_UPDATE_INTERVAL: u32 = 8;
 
 // ── Sprint 4: Formation + Arrival ──────────────────────────────────────────
 
@@ -197,8 +189,10 @@ struct UnitGroup {
     start_world: glam::Vec3,
     /// World-space destination.
     goal_world: glam::Vec3,
-    /// Pre-computed flowfield for this group's goal.
-    flow_field: FlowField,
+    /// A* waypoints from start to goal (world-space XZ, simplified).
+    /// Each unit in the group steers toward `path[path_idx] + formation_offset`
+    /// so every unit targets its own formation slot at each waypoint.
+    path: Vec<glam::Vec2>,
 }
 
 /// Per-group formation state: arrival tracking and travel direction.
@@ -209,8 +203,11 @@ struct UnitGroup {
 struct GroupFormation {
     /// True once enough units have reached the goal — group is disbanded (idle).
     arrived: bool,
-    /// Last known travel direction (flowfield dir at group centroid). Vec2::ZERO until first update.
+    /// Last known travel direction (toward current path waypoint). Vec2::ZERO until first update.
     travel_dir: glam::Vec2,
+    /// Index into `UnitGroup::path` for the waypoint the group is currently approaching.
+    /// Advances when the group centroid is closer to the next waypoint than the current one.
+    path_idx: usize,
 }
 
 impl GroupFormation {
@@ -218,6 +215,7 @@ impl GroupFormation {
         Self {
             arrived: false,
             travel_dir: glam::Vec2::ZERO,
+            path_idx: 0,
         }
     }
 }
@@ -233,8 +231,8 @@ fn create_crossing_groups(nav_grid: &NavigationGrid) -> Vec<UnitGroup> {
     defs.iter().enumerate().map(|(i, (start_xz, goal_xz, color))| {
         let start_world = glam::Vec3::new(start_xz[0], 0.5, start_xz[1]);
         let goal_world  = glam::Vec3::new(goal_xz[0],  0.0, goal_xz[1]);
-        let flow_field  = compute_flowfield(nav_grid, goal_world);
-        UnitGroup { id: i as u32, color: *color, start_world, goal_world, flow_field }
+        let path        = compute_astar(nav_grid, start_world, goal_world);
+        UnitGroup { id: i as u32, color: *color, start_world, goal_world, path }
     }).collect()
 }
 
@@ -275,8 +273,6 @@ struct State {
     groups: Vec<UnitGroup>,
     formations: Vec<GroupFormation>,
     spatial_grid: SpatialGrid,
-    density_map: DensityMap,
-    frame_count: u32,
 
     // Camera & Input
     camera: RtsCamera,
@@ -292,9 +288,7 @@ struct State {
     debug_overlay: DebugOverlay,
     /// F4 toggle: draw avoidance-radius circles and velocity arrows per unit.
     debug_units_visible: bool,
-    /// F5 toggle: draw flowfield arrows and density heatmap.
-    debug_flowfield_visible: bool,
-    /// Milliseconds spent on the last flowfield recomputation pass.
+    /// Milliseconds spent on the last A* computation pass.
     pathfinding_last_ms: f32,
     /// Running total of flowfield recomputes since startup.
     flowfield_recompute_count: u32,
@@ -592,8 +586,6 @@ impl State {
             nav_grid,
             groups,
             spatial_grid,
-            density_map: DensityMap::new(GRID_WIDTH, GRID_HEIGHT),
-            frame_count: 0,
             camera: RtsCamera::new(),
             input: {
                 let mut input = InputState::new();
@@ -606,7 +598,6 @@ impl State {
             current_fps: 0,
             debug_overlay,
             debug_units_visible: false,
-            debug_flowfield_visible: false,
             pathfinding_last_ms: 0.0,
             flowfield_recompute_count: 0,
         }
@@ -635,9 +626,6 @@ impl State {
         if self.input.is_key_just_pressed(KeyCode::F4) {
             self.debug_units_visible = !self.debug_units_visible;
         }
-        if self.input.is_key_just_pressed(KeyCode::F5) {
-            self.debug_flowfield_visible = !self.debug_flowfield_visible;
-        }
 
         self.camera.update(&self.input, dt);
 
@@ -652,8 +640,7 @@ impl State {
         //   6. Integrate positions
 
         // ── 1. Collect snapshots ─────────────────────────────────────────────
-        let nav_grid = &self.nav_grid;
-        let groups   = &self.groups;
+        let groups = &self.groups;
 
         struct UnitSnap {
             entity:           bevy_ecs::entity::Entity,
@@ -756,25 +743,33 @@ impl State {
 
             if group_unit_data[gid].is_empty() { continue; }
 
-            let centroid_xz   = group_centroids[gid];
-            let centroid_world = Vec3::new(centroid_xz.x, 0.5, centroid_xz.y);
+            let centroid_xz = group_centroids[gid];
 
-            // ── Update travel direction from flowfield at group centroid ───────
-            let flow_at_centroid = self.nav_grid
-                .world_to_cell(centroid_world)
-                .map(|cell| self.groups[gid].flow_field.sample_cell(cell))
-                .unwrap_or(glam::Vec2::ZERO);
+            // ── Advance path waypoint ─────────────────────────────────────────
+            // Move to the next waypoint when the centroid is closer to it than
+            // to the current one (greedy look-ahead along the shared A* path).
+            {
+                let path = &self.groups[gid].path;
+                let mut idx = self.formations[gid].path_idx;
+                while idx + 1 < path.len() {
+                    let to_cur  = (path[idx]     - centroid_xz).length_squared();
+                    let to_next = (path[idx + 1] - centroid_xz).length_squared();
+                    if to_next <= to_cur { idx += 1; } else { break; }
+                }
+                self.formations[gid].path_idx = idx;
+            }
 
-            if flow_at_centroid.length_squared() > 0.01 {
-                self.formations[gid].travel_dir = flow_at_centroid.normalize();
-            } else if self.formations[gid].travel_dir.length_squared() < 0.01 {
-                let goal  = self.groups[gid].goal_world;
-                let to_goal = glam::Vec2::new(
-                    goal.x - centroid_xz.x,
-                    goal.z - centroid_xz.y,
-                );
-                if to_goal.length_squared() > 0.01 {
-                    self.formations[gid].travel_dir = to_goal.normalize();
+            // ── Update travel direction from current path waypoint ────────────
+            {
+                let path    = &self.groups[gid].path;
+                let idx     = self.formations[gid].path_idx;
+                let waypoint = path.get(idx).copied().unwrap_or_else(|| {
+                    let g = self.groups[gid].goal_world;
+                    glam::Vec2::new(g.x, g.z)
+                });
+                let to_wp = waypoint - centroid_xz;
+                if to_wp.length_squared() > 0.01 {
+                    self.formations[gid].travel_dir = to_wp.normalize();
                 }
             }
         }
@@ -864,18 +859,17 @@ impl State {
                 (snap.max_speed, 1.0_f32)
             };
 
-            // Flowfield direction (scaled by wait_factor for leading units).
-            let pos3 = Vec3::new(snap.pos.x, 0.5, snap.pos.y);
-            let dir  = nav_grid
-                .world_to_cell(pos3)
-                .map(|cell| group.flow_field.sample_cell(cell))
-                .unwrap_or(glam::Vec2::ZERO);
-            let flowfield_vel = if dir == glam::Vec2::ZERO {
-                let goal = glam::Vec2::new(group.goal_world.x, group.goal_world.z);
-                (goal - snap.pos).normalize_or_zero() * effective_max_speed * wait_factor
-            } else {
-                dir * effective_max_speed * wait_factor
-            };
+            // Steer directly toward this unit's formation slot at the current
+            // path waypoint.  Each unit targets a different world position
+            // (waypoint + its own formation_offset), so the group travels in
+            // formation the entire way — no converge-then-disperse two-step.
+            let path_idx = formations.get(gid).map(|f| f.path_idx).unwrap_or(0);
+            let waypoint = groups[gid].path.get(path_idx)
+                .copied()
+                .unwrap_or(glam::Vec2::new(group.goal_world.x, group.goal_world.z));
+            let unit_goal  = waypoint + snap.formation_offset;
+            let steer_vel  = (unit_goal - snap.pos).normalize_or_zero()
+                * effective_max_speed * wait_factor;
 
             // Slot pull: full 2D spring toward the unit's fixed formation slot.
             //
@@ -902,7 +896,7 @@ impl State {
                 glam::Vec2::ZERO
             };
 
-            let desired_vel = (flowfield_vel + slot_pull_vel).clamp_length_max(effective_max_speed);
+            let desired_vel = (steer_vel + slot_pull_vel).clamp_length_max(effective_max_speed);
             (desired_vel, effective_max_speed)
         }).unzip();
 
@@ -947,38 +941,6 @@ impl State {
             }
         }
 
-        // ── 7. Density-feedback flowfield recomputation (every N frames) ─────
-        //
-        // Rebuild the density map from current unit positions, then recompute
-        // each group's flowfield with a density surcharge so units spread across
-        // the full corridor width instead of queuing in a single-file line.
-        //
-        // Runs on fresh post-integration positions so the surcharge reflects
-        // where units actually are after this frame's movement.
-        // See pathfinding.md §"Layer 2: Group Flowfield / The Novel Part".
-        self.frame_count += 1;
-        if self.frame_count % DENSITY_UPDATE_INTERVAL == 0 {
-            let t_pf = std::time::Instant::now();
-
-            self.density_map.clear();
-            {
-                let mut q = self.world.query::<&Transform>();
-                for tf in q.iter(&self.world) {
-                    self.density_map.add_unit(tf.position);
-                }
-            }
-            for group in &mut self.groups {
-                group.flow_field = compute_flowfield_with_density(
-                    &self.nav_grid,
-                    group.goal_world,
-                    &self.density_map,
-                    DENSITY_WEIGHT,
-                );
-            }
-
-            self.pathfinding_last_ms = t_pf.elapsed().as_secs_f32() * 1000.0;
-            self.flowfield_recompute_count += 1;
-        }
     }
 
     fn render(&mut self, window: &winit::window::Window) -> Result<(), wgpu::SurfaceError> {
@@ -1059,7 +1021,7 @@ impl State {
 
         // Debug overlay (egui) — F3 = stats, F4 = unit circles, F5 = flowfield/density.
         // Run one egui frame covering all active layers so we tessellate only once.
-        if self.debug_overlay.visible || self.debug_units_visible || self.debug_flowfield_visible {
+        if self.debug_overlay.visible || self.debug_units_visible {
             let ppp = window.scale_factor() as f32;
             let sw  = self.config.width  as f32;
             let sh  = self.config.height as f32;
@@ -1119,70 +1081,6 @@ impl State {
                 Some(draws)
             } else { None };
 
-            // ── F5 flowfield arrows + density heatmap ────────────────────────
-            //
-            // Flowfield: sample every 3rd cell of group 0's flowfield.
-            // Density:   draw all cells that have at least one unit.
-            let (flowfield_arrows, density_cells): (Option<Vec<FlowfieldArrowDraw>>, Option<Vec<DensityCell>>) =
-                if self.debug_flowfield_visible {
-                    // Arrow length in world units — 40% of one cell so tips stay inside the cell.
-                    const ARROW_LEN: f32 = 0.40;
-                    const STEP: u32 = 3;
-                    const MAX_DENSITY: f32 = 5.0;
-
-                    let vp = self.camera.view_projection(sw / sh);
-
-                    let mut arrows: Vec<FlowfieldArrowDraw> = Vec::new();
-                    let flow = &self.groups[0].flow_field;
-                    for cz in (0..GRID_HEIGHT).step_by(STEP as usize) {
-                        for cx in (0..GRID_WIDTH).step_by(STEP as usize) {
-                            let cell = UVec2::new(cx, cz);
-                            let dir = flow.sample_cell(cell);
-                            if dir == glam::Vec2::ZERO { continue; }
-
-                            let center = self.nav_grid.cell_center(cell);
-                            let tip = Vec3::new(
-                                center.x + dir.x * ARROW_LEN,
-                                center.y,
-                                center.z + dir.y * ARROW_LEN,
-                            );
-                            if let (Some(from), Some(to)) = (
-                                world_to_screen(center, vp, sw, sh, ppp),
-                                world_to_screen(tip, vp, sw, sh, ppp),
-                            ) {
-                                arrows.push(FlowfieldArrowDraw { from, to });
-                            }
-                        }
-                    }
-
-                    let mut cells: Vec<DensityCell> = Vec::new();
-                    for cz in 0..GRID_HEIGHT {
-                        for cx in 0..GRID_WIDTH {
-                            let cell = UVec2::new(cx, cz);
-                            let count = self.density_map.get(cell);
-                            if count < 0.5 { continue; }
-
-                            let center_w = self.nav_grid.cell_center(cell);
-                            let edge_w   = Vec3::new(center_w.x + 0.5, center_w.y, center_w.z);
-                            if let Some(center_s) = world_to_screen(center_w, vp, sw, sh, ppp) {
-                                let size_px = world_to_screen(edge_w, vp, sw, sh, ppp)
-                                    .map(|ep| {
-                                        let dx = ep.x - center_s.x;
-                                        let dy = ep.y - center_s.y;
-                                        (dx * dx + dy * dy).sqrt() * 2.0
-                                    })
-                                    .unwrap_or(4.0);
-                                let intensity = (count / MAX_DENSITY).min(1.0);
-                                cells.push(DensityCell { center: center_s, size_px, intensity });
-                            }
-                        }
-                    }
-
-                    (Some(arrows), Some(cells))
-                } else {
-                    (None, None)
-                };
-
             let screen_descriptor = egui_wgpu::ScreenDescriptor {
                 size_in_pixels: [self.config.width, self.config.height],
                 pixels_per_point: ppp,
@@ -1197,8 +1095,8 @@ impl State {
                 &screen_descriptor,
                 stats.as_ref(),
                 unit_draws.as_deref(),
-                flowfield_arrows.as_deref(),
-                density_cells.as_deref(),
+                None,
+                None,
             );
         }
 

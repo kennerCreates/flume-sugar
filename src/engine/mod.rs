@@ -17,7 +17,7 @@ pub mod systems;
 // Re-export commonly used items
 pub use components::*;
 pub use mesh::triangulate_smooth;
-pub use navigation::{NavigationGrid, FlowField, DensityMap, compute_flowfield, compute_flowfield_with_density, GRID_WIDTH, GRID_HEIGHT};
+pub use navigation::{NavigationGrid, compute_astar, GRID_WIDTH, GRID_HEIGHT};
 pub use orca::{AgentSnapshot, SpatialGrid, compute_orca_velocity};
 pub use skin::{SkinGraph, skin_modifier};
 pub use subdivide::subdivide;
