@@ -28,7 +28,11 @@ const UNIT_RADIUS: f32 = 0.5;
 /// Units within this world-space distance of their goal are considered arrived.
 const ARRIVAL_RADIUS: f32 = 1.5;
 /// ORCA look-ahead window (seconds).  Shorter = more direct movement; longer = smoother lanes.
-const ORCA_TIME_HORIZON: f32 = 0.8;
+/// At UNIT_SPEED 2.5 the two groups close at ~5 u/s. A horizon of 0.8 s gives only
+/// 2 units of warning — smaller than a single formation row — so ORCA fires when
+/// units are already touching, making the LP infeasible and stalling the whole front.
+/// 2.5 s gives ~12 units of warning, letting avoidance begin before contact.
+const ORCA_TIME_HORIZON: f32 = 2.5;
 
 // ── Sprint 4: Formation + Arrival ──────────────────────────────────────────
 
@@ -1166,11 +1170,18 @@ fn spawn_crossing_scene(world: &mut World, groups: &[UnitGroup]) {
                     spawn_z - centroid_z,
                 );
 
-                // Alternating priority by formation column: even columns hold course
-                // (priority 0), odd columns step aside (priority 1).  When two units
-                // of different priority meet, the higher-rank unit (lower value) takes
-                // only 20% ORCA responsibility; the lower-rank unit takes 80%.
-                let priority = (w % 2) as u32;
+                // Priority is the group id, not the column within the group.
+                //
+                // The old column-based scheme (w % 2) distributed priorities
+                // identically across both groups, so every inter-group encounter
+                // had a random mix of 50/50 and 20/80 responsibility — no consistent
+                // "group 1 yields" signal and no stable passing lane.
+                //
+                // Using group.id means all group-0 units hold course (20% ORCA
+                // responsibility) and all group-1 units step aside (80%).  This
+                // gives ORCA a coherent bias: group-1 units consistently deflect
+                // the same way, opening a lane for group-0 to pass through.
+                let priority = group.id;
                 world.spawn((
                     Transform::from_position(Vec3::new(spawn_x, 0.5, spawn_z)),
                     Velocity { linear: Vec3::ZERO },

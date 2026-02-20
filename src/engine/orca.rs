@@ -12,8 +12,10 @@ use glam::Vec2;
 
 const EPSILON: f32 = 1e-5;
 /// Maximum number of inter-group neighbours considered per agent per frame.
-/// Capping this prevents the LP from becoming infeasible in dense crossings.
-const MAX_ORCA_NEIGHBORS: usize = 10;
+/// With 75 units per group a unit in the centre of the crossing zone can easily
+/// see 20+ opponents within its ORCA radius.  A cap of 10 silently dropped those
+/// extra constraints, letting units penetrate neighbours the LP never saw.
+const MAX_ORCA_NEIGHBORS: usize = 20;
 
 // ============================================================================
 // SPATIAL GRID
